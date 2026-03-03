@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# macOS
+.DS_Store
+.AppleDouble
+
+# Private / internal notes (not for public repo)
+AGENTS.md
+CLAUDE.md
+PTNDATA_CANONICAL.md
+FIRMWARE_SINGLE_SOURCE.md
+
+# Test binary artifacts
+test_*.bin
+
+# User data and local content
+Backup/
+snapshots/
+
+# Clearance pending — do not publish
+User-Library/Drums/
+User-Library/Grooves/
+User-Library/Patterns/
+User-Library/Samples/
+
+# Card image files (large, hardware-specific)
+*.SP0
