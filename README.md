@@ -38,21 +38,9 @@ chmod +x Dr_Sidekick.py
 ./Dr_Sidekick.py
 ```
 
-Debug mode (extra logging):
-
-```bash
-python3 Dr_Sidekick.py --debug
-```
-
-Syntax check:
-
-```bash
-python3 -m py_compile Dr_Sidekick.py
-```
-
 ## Status
 
-Beta. Core workflows are functional and have been tested against real SP-303 hardware.
+Beta. Core workflows are functional and have been tested against with SP-303 hardware.
 Please report issues at [github.com/OneCoinOnePlay/dr-sidekick/issues](https://github.com/OneCoinOnePlay/dr-sidekick/issues).
 
 ## File Format Notes
@@ -65,19 +53,6 @@ Dr. Sidekick reads and writes the SP-303's native SmartMedia card format:
 | `PTNINFO0.SP0` | Pattern metadata and slot mapping (64 bytes) |
 | `SMPINFO0.SP0` | Sample slot assignments (65 536 bytes) |
 | `SMPxxxxL/R.SP0` | Sample audio data |
-
-## Architecture
-
-The entire application is a single file: `Dr_Sidekick.py`. There are no external modules beyond the standard library and Tkinter.
-
-**Layer 1 — Binary format engine**
-Parses and writes `PTNINFO0.SP0`, `PTNDATA0.SP0`, and `SMPINFO0.SP0`. Handles delta-tick serialization, rest-event chaining for gaps over 255 ticks, and slot-to-pattern pointer mapping.
-
-**Layer 2 — Library and session utilities**
-JSON catalog for indexing local sample and groove assets under `User-Library/`. Pure-Python MIDI format 0 parser (no third-party MIDI library). Card-prep orchestration for copying files to the SmartMedia directory structure.
-
-**Layer 3 — GUI**
-`PatternModel` owns the data and undo/redo stack. `PianoRollCanvas` is the visual editor (X = ticks, Y = 32 pad lanes across Banks A–D). `SP303PatternEditor` is the main window with all toolbar, menu, and dialog logic.
 
 ## User-Library
 
