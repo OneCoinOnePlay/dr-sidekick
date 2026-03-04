@@ -5340,7 +5340,7 @@ Velocity:
         session = AssignmentSession()
         dialog = tk.Toplevel(self.root)
         dialog.title("SmartMedia Manager")
-        dialog.geometry("1180x620")
+        dialog.geometry("1180x680")
         dialog.transient(self.root)
         dialog.grab_set()
         dialog.configure(bg="#000000")
@@ -5353,10 +5353,6 @@ Velocity:
         ttk.Label(
             frame,
             text="Coming Soon: Long/Lo-Fi, Loop, Reverse and DSP Effect editing.",
-        ).pack(anchor=tk.W, pady=(0, 4))
-        ttk.Label(
-            frame,
-            text="Gate: select a pad then click Toggle Gate (requires card setup to be loaded).",
         ).pack(anchor=tk.W, pady=(0, 4))
         dialog_context = ttk.Label(frame, text="Card Setup: Not loaded | Pending pad changes: 0")
         dialog_context.pack(anchor=tk.W, pady=(0, 8))
@@ -5403,7 +5399,7 @@ Velocity:
 
         ttk.Label(
             frame,
-            text="Tip: Load SMPINFO0.SP0 to view slot metadata. Select a row to assign WAV/SP0 and re-map pads.",
+            text="Tip: Load SMPINFO0.SP0 to view slot metadata. Select a row to assign WAV/SP0 and re-map pads. Click Gate to toggle.",
         ).pack(anchor=tk.W, pady=(8, 8))
 
         control_panel = tk.Frame(frame, bg="#050505", highlightbackground="#2a2a2a", highlightthickness=1, bd=0)
@@ -5662,19 +5658,6 @@ Velocity:
             refresh_tree()
             self.update_status(f"Cleared {slot_to_label(slot)}")
 
-        def toggle_gate():
-            slot = selected_slot()
-            if slot is None:
-                return
-            if slot not in slot_metadata:
-                messagebox.showinfo("Toggle Gate", "Load card setup (SMPINFO0.SP0) first.", parent=dialog)
-                return
-            new_gate = not gate_state.get(slot, False)
-            gate_state[slot] = new_gate
-            slot_metadata[slot]["gate"] = "Gate" if new_gate else "Off"
-            refresh_tree()
-            self.update_status(f"{slot_to_label(slot)} Gate: {'On' if new_gate else 'Off'}")
-
         def assign_wav_to_slot(slot: int, wav_path: Path):
             session.assign_wav(slot, wav_path)
             refresh_tree()
@@ -5749,14 +5732,6 @@ Velocity:
 
                 results = session.prepare_card(output_dir)
                 smpinfo_out = output_dir / "SMPINFO0.SP0"
-                # Patch gate flags into the generated SMPINFO before any tail-merge
-                if gate_state and smpinfo_out.exists():
-                    patched = bytearray(smpinfo_out.read_bytes())
-                    for slot, is_gate in gate_state.items():
-                        byte_off = slot * 48 + 37  # byte 0x25 of slot record
-                        if byte_off < len(patched):
-                            patched[byte_off] = 0x01 if is_gate else 0x00
-                    smpinfo_out.write_bytes(patched)
                 if loaded_smpinfo_bytes is not None and smpinfo_out.exists():
                     # Preserving the full extended tail can override pad reassignments.
                     # Only preserve it when archived SP0 assignments still match native slot filenames.
@@ -5779,6 +5754,24 @@ Velocity:
                                 "Skipped SMPINFO tail preservation because pad reassignment was detected."
                             )
                         smpinfo_out.write_bytes(merged)
+                # Patch gate into ALL slot-record blocks AFTER the tail merge.
+                # The SP-303 reads from the LAST written block in the write log
+                # (0x0400, 0x0800, …), not from 0x0000, so we must update every block.
+                if gate_state and smpinfo_out.exists():
+                    patched = bytearray(smpinfo_out.read_bytes())
+                    block_size = 0x400
+                    num_blocks = len(patched) // block_size
+                    for slot, is_gate in gate_state.items():
+                        gate_byte = 0x01 if is_gate else 0x00
+                        for blk in range(num_blocks):
+                            blk_start = blk * block_size
+                            # Stop at first unwritten (0xFF-filled) block
+                            if patched[blk_start:blk_start + 4] == b'\xff\xff\xff\xff':
+                                break
+                            byte_off = blk_start + slot * 48 + 37
+                            if byte_off < len(patched):
+                                patched[byte_off] = gate_byte
+                    smpinfo_out.write_bytes(patched)
                 self.show_prepare_results(results, output_dir, "Custom Assignment Complete")
                 self.update_status("Custom pad assignment complete")
                 if baseline_assignments:
@@ -5844,7 +5837,6 @@ Velocity:
                 self.update_status(f"Loaded backup to {output_dir}")
 
         ttk.Button(setup_row, text="Load Card Setup", command=load_smpinfo_metadata).pack(side=tk.LEFT, padx=(0, 6))
-        ttk.Button(setup_row, text="Toggle Gate", command=toggle_gate).pack(side=tk.LEFT, padx=(0, 6))
         ttk.Button(setup_row, text="Backup Card", command=backup_card).pack(side=tk.LEFT, padx=(0, 6))
         ttk.Button(setup_row, text="Load Backup", command=load_backup).pack(side=tk.LEFT, padx=(0, 6))
         ttk.Button(route_row, text="Assign WAV", command=assign_wav).pack(side=tk.LEFT, padx=(0, 6))
@@ -5974,13 +5966,35 @@ Velocity:
                 return
             set_rearrange_target(row_id)
 
-        def on_tree_release(_event):
+        # Column indices (1-based, show="headings"):
+        # #1=bank_pad #2=source #3=file #4=long_lofi #5=stereo #6=length #7=duration #8=gate #9=loop #10=reverse
+        TOGGLE_COLS = {"#8": "gate"}  # add "#9": "loop", "#10": "reverse" when implemented
+
+        def handle_cell_toggle(slot: int, col_id: str):
+            field = TOGGLE_COLS.get(col_id)
+            if not field:
+                return
+            if loaded_smpinfo_path is None or slot not in slot_metadata:
+                return
+            if field == "gate":
+                new_val = not gate_state.get(slot, False)
+                gate_state[slot] = new_val
+                slot_metadata[slot]["gate"] = "Gate" if new_val else "Off"
+                refresh_tree()
+                self.update_status(f"{slot_to_label(slot)} Gate: {'On' if new_val else 'Off'}")
+
+        def on_tree_release(event):
             nonlocal rearrange_source_iid
             if rearrange_source_iid and rearrange_target_iid:
                 try:
                     swap_assignments(int(rearrange_source_iid), int(rearrange_target_iid))
                 except Exception as exc:
                     messagebox.showerror("Rearrange Pads", str(exc), parent=dialog)
+            elif rearrange_source_iid:
+                row_id = tree.identify_row(event.y)
+                col_id = tree.identify_column(event.x)
+                if row_id and row_id == rearrange_source_iid and col_id in TOGGLE_COLS:
+                    handle_cell_toggle(int(row_id), col_id)
             rearrange_source_iid = None
             set_rearrange_target(None)
 
