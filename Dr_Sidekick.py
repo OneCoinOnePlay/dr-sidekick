@@ -3,22 +3,7 @@
 Dr. Sidekick - Standalone graphical pattern editor and SmartMedia librarian for the BOSS Dr. Sample SP-303
 ==========================================================================================================
 
-Features:
-- Visual piano roll with 32 pad lanes (Banks A, B, C & D)
-- Click to add/remove notes
-- Drag to move notes
-- Grid snapping (Quantise: Off, 4, 8, 8-3, 16)
-- Multi-select and edit operations
-- Undo/redo support
-- MIDI import with PPQN conversion
-- Velocity editing and visualization
-- Quantize selected notes
-- Copy/paste slots
-- Pattern info display
-- Hardware-verified pattern format
-
 Author: One Coin One Play
-Version: 1.0 3rd March 2026
 github.com/OneCoinOnePlay
 """
 
@@ -2045,7 +2030,7 @@ SLOT_COUNT = 16
 DEFAULT_PATTERN_LENGTH_BARS = 4  # Default pattern length
 MAX_PATTERN_LENGTH_BARS = 99  # SP-303 hardware maximum
 TUPLE_ZONE_MAX_BYTES = 0x272 - 0x70  # PTNDATA event payload capacity per pattern slot
-APP_VERSION = "0.1.0"
+APP_VERSION = "0.2.0"
 
 
 def load_midi_notes_by_channel(midi_path: str) -> Tuple[Dict[int, List[Tuple[int, int, int]]], int]:
@@ -3707,15 +3692,11 @@ class SP303PatternEditor:
         card_menu = tk.Menu(menubar, tearoff=0)
         menubar.add_cascade(label="Samples", menu=card_menu)
         card_menu.add_command(label="Quick Import WAV Folder...", command=self.on_quick_import_card)
-        card_menu.add_command(label="Sample Management...", command=self.on_custom_pad_assignment)
-
-        # Library menu (migrated from CLI)
-        library_menu = tk.Menu(menubar, tearoff=0)
-        menubar.add_cascade(label="Library", menu=library_menu)
-        library_menu.add_command(label="Manage Library...", command=self.on_manage_library)
+        card_menu.add_command(label="SmartMedia Manager...", command=self.on_custom_pad_assignment)
+        card_menu.add_separator()
+        card_menu.add_command(label="Pack Library... (Coming Soon)", command=self.on_manage_library, state=tk.DISABLED)
         self.pattern_menu = pattern_menu
         self.samples_menu = card_menu
-        self.library_menu = library_menu
 
         # Help menu
         help_menu = tk.Menu(menubar, tearoff=0)
@@ -3936,7 +3917,7 @@ class SP303PatternEditor:
     def show_home_launcher(self):
         dialog = tk.Toplevel(self.root)
         dialog.title("Dr. Sidekick Home")
-        dialog.geometry("880x560")
+        dialog.geometry("560x340")
         dialog.transient(self.root)
         dialog.grab_set()
         dialog.configure(bg="#000000")
@@ -3947,25 +3928,11 @@ class SP303PatternEditor:
         ttk.Label(frame, text="Dr. Sidekick", font=("Courier", 18, "bold")).pack(anchor=tk.W)
         ttk.Label(
             frame,
-            text="Standalone graphical pattern editor and SmartMedia librarian for the Boss SP-303. Pick what you want to do next.",
+            text="Pattern editor and SmartMedia librarian for the Boss Dr. Sample SP-303.",
         ).pack(anchor=tk.W, pady=(4, 12))
 
-        top_row = ttk.Frame(frame)
-        top_row.pack(fill=tk.X, pady=(0, 10))
-
-        card = tk.Frame(frame, bg="#040404", highlightbackground="#2a2a2a", highlightthickness=1, bd=0)
-        card.pack(fill=tk.BOTH, expand=True)
-
-        left = tk.Frame(card, bg="#040404")
-        left.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(10, 8), pady=10)
-        right = tk.Frame(card, bg="#040404")
-        right.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(8, 10), pady=10)
-
-        tk.Label(left, text="PRIMARY TASKS", bg="#040404", fg="#f0f0f0", font=("Courier", 12, "bold")).pack(anchor=tk.W, pady=(0, 6))
-        tk.Label(right, text="SUPPORT TASKS", bg="#040404", fg="#f0f0f0", font=("Courier", 12, "bold")).pack(anchor=tk.W, pady=(0, 6))
-
-        def create_task_button(parent, title: str, desc: str, action, workflow: str):
-            btn_frame = tk.Frame(parent, bg="#090909", highlightbackground="#2f2f2f", highlightthickness=1, bd=0)
+        def create_task_button(title: str, desc: str, action, workflow: str):
+            btn_frame = tk.Frame(frame, bg="#090909", highlightbackground="#2f2f2f", highlightthickness=1, bd=0)
             btn_frame.pack(fill=tk.X, pady=4)
 
             def run_action():
@@ -3981,55 +3948,28 @@ class SP303PatternEditor:
                 anchor="w",
                 bg="#090909",
                 fg="#d0d0d0",
-                wraplength=400,
+                wraplength=500,
             ).pack(fill=tk.X, padx=8, pady=(0, 8))
 
         create_task_button(
-            left,
-            "Edit Patterns",
-            "Return to the pattern editor to view or edit the current pattern.",
+            "Pattern Editor",
+            "Create new patterns or edit existing patterns. Import MIDI and apply grooves.",
             lambda: None,
             "Patterns",
         )
         create_task_button(
-            left,
-            "Sample Management",
-            "Load card setup, reassign pads, and write changes to card.",
+            "SmartMedia Manager",
+            "Helps you manage your SmartMedia card.",
             self.on_custom_pad_assignment,
             "Samples/Card",
         )
         create_task_button(
-            left,
-            "Quick Import WAV Folder",
-            "Prepare WAV import sets for one-bank-at-a-time loading.",
+            "Quick Import",
+            "Get a whole bank of audio files onto your SmartMedia card fast.",
             self.on_quick_import_card,
             "Samples/Card",
         )
-        create_task_button(
-            right,
-            "Manage Library",
-            "Scan, add, load, and organize your catalog entries.",
-            self.on_manage_library,
-            "Library",
-        )
-        create_task_button(
-            right,
-            "Backup Card",
-            "Create a full SP0 backup from a card setup file.",
-            self.on_backup_card_quick,
-            "Backup/Restore",
-        )
-        create_task_button(
-            right,
-            "Restore Backup",
-            "Restore SP0 files from Backup folder to card/output path.",
-            self.on_restore_backup_quick,
-            "Backup/Restore",
-        )
 
-        close_row = ttk.Frame(frame)
-        close_row.pack(fill=tk.X, pady=(10, 0))
-        ttk.Button(close_row, text="Close", command=dialog.destroy).pack(side=tk.RIGHT)
 
     def update_status(self, message: str):
         """Update status bar"""
@@ -5361,7 +5301,7 @@ Velocity:
     def on_custom_pad_assignment(self):
         session = AssignmentSession()
         dialog = tk.Toplevel(self.root)
-        dialog.title("Sample Management (Experimental)")
+        dialog.title("SmartMedia Manager")
         dialog.geometry("1180x620")
         dialog.transient(self.root)
         dialog.grab_set()
@@ -5370,8 +5310,8 @@ Velocity:
         frame = ttk.Frame(dialog, padding=10)
         frame.pack(fill=tk.BOTH, expand=True)
 
-        ttk.Label(frame, text="SAMPLE MANAGEMENT", font=("Courier", 13, "bold")).pack(anchor=tk.W, pady=(0, 2))
-        ttk.Label(frame, text="Experimental: sample management and pad reassignment workflow.").pack(anchor=tk.W, pady=(0, 4))
+        ttk.Label(frame, text="SmartMedia Manager", font=("Courier", 13, "bold")).pack(anchor=tk.W, pady=(0, 2))
+        ttk.Label(frame, text="Helps you manage the samples on your SmartMedia card. You can also reorganise the order by dragging them into new positions.").pack(anchor=tk.W, pady=(0, 4))
         ttk.Label(
             frame,
             text="Coming Soon: Long/Lo-Fi, Loop, Reverse and DSP Effect editing.",
@@ -5484,7 +5424,7 @@ Velocity:
         def selected_slot() -> Optional[int]:
             selected = tree.selection()
             if not selected:
-                messagebox.showinfo("Sample Management", "Select a pad first.", parent=dialog)
+                messagebox.showinfo("SmartMedia Manager", "Select a pad first.", parent=dialog)
                 return None
             return int(selected[0])
 
@@ -6093,7 +6033,7 @@ Velocity:
 
     def on_manage_library(self):
         dialog = tk.Toplevel(self.root)
-        dialog.title("Library Manager")
+        dialog.title("Pack Library")
         dialog.geometry("900x540")
         dialog.transient(self.root)
         dialog.grab_set()
@@ -6140,7 +6080,7 @@ Velocity:
         def selected_entry() -> Optional[LibraryEntry]:
             selected = tree.selection()
             if not selected:
-                messagebox.showinfo("Library Manager", "Select an entry first.", parent=dialog)
+                messagebox.showinfo("Pack Library", "Select an entry first.", parent=dialog)
                 return None
             idx = int(selected[0])
             values = tree.item(selected[0], "values")
@@ -6169,9 +6109,9 @@ Velocity:
                 return
             found = self.library.scan_directory(Path(scan_dir), LibraryType.DRUM_MACHINE)
             if not found:
-                messagebox.showinfo("Library Manager", "No drum packs found.", parent=dialog)
+                messagebox.showinfo("Pack Library", "No drum packs found.", parent=dialog)
                 return
-            if messagebox.askyesno("Library Manager", f"Add {len(found)} drums entries?", parent=dialog):
+            if messagebox.askyesno("Pack Library", f"Add {len(found)} drums entries?", parent=dialog):
                 self.library.add_entries(found)
                 refresh()
 
@@ -6185,9 +6125,9 @@ Velocity:
                 return
             found = self.library.scan_directory(Path(scan_dir), LibraryType.GROOVE_PACK)
             if not found:
-                messagebox.showinfo("Library Manager", "No groove packs found.", parent=dialog)
+                messagebox.showinfo("Pack Library", "No groove packs found.", parent=dialog)
                 return
-            if messagebox.askyesno("Library Manager", f"Add {len(found)} grooves entries?", parent=dialog):
+            if messagebox.askyesno("Pack Library", f"Add {len(found)} grooves entries?", parent=dialog):
                 self.library.add_entries(found)
                 refresh()
 
@@ -6282,7 +6222,7 @@ Velocity:
 
                 self.library.add_entries(entries_to_add)
                 messagebox.showinfo(
-                    "Library Manager",
+                    "Pack Library",
                     f"Added {len(entries_to_add)} entr{'y' if len(entries_to_add) == 1 else 'ies'} from {selected_path.name}.\n"
                     f"Project Packs (pack.json): {pattern_entries}\n"
                     f"Groove folders: {groove_entries}",
@@ -6290,7 +6230,7 @@ Velocity:
                 )
                 refresh()
             except Exception as exc:
-                messagebox.showerror("Library Manager", str(exc), parent=dialog)
+                messagebox.showerror("Pack Library", str(exc), parent=dialog)
             finally:
                 dialog.configure(cursor="")
 
@@ -6298,7 +6238,7 @@ Velocity:
             entry = selected_entry()
             if entry is None:
                 return
-            if messagebox.askyesno("Library Manager", f"Remove '{entry.name}' from catalog?", parent=dialog):
+            if messagebox.askyesno("Pack Library", f"Remove '{entry.name}' from catalog?", parent=dialog):
                 self.library.remove_entry(entry.name)
                 refresh()
 
@@ -6316,7 +6256,7 @@ Velocity:
                 if entry.type == LibraryType.GROOVE_PACK:
                     grooves = payload.get("grooves", [])
                     if not grooves:
-                        messagebox.showwarning("Library Manager", "No grooves found in this pack.", parent=dialog)
+                        messagebox.showwarning("Pack Library", "No grooves found in this pack.", parent=dialog)
                         return
                     groove_lines = [f"{i + 1}. {groove.name}" for i, groove in enumerate(grooves)]
                     groove_choice = simpledialog.askinteger(
@@ -6353,12 +6293,12 @@ Velocity:
                     if target_pad is None:
                         return
                     apply_groove_to_card(output_dir, grooves[groove_choice - 1], pattern_slot, target_pad)
-                    messagebox.showinfo("Library Manager", "Groove applied successfully.", parent=dialog)
+                    messagebox.showinfo("Pack Library", "Groove applied successfully.", parent=dialog)
                 else:
                     self.show_prepare_results(payload.get("results", {}), output_dir, "Library Load Complete")
                 self.update_status(f"Loaded library entry: {entry.name}")
             except Exception as exc:
-                messagebox.showerror("Library Manager", str(exc), parent=dialog)
+                messagebox.showerror("Pack Library", str(exc), parent=dialog)
 
         ttk.Button(search_row, text="Search", command=run_search).pack(side=tk.LEFT, padx=(0, 4))
         ttk.Button(search_row, text="Reset", command=lambda: (search_var.set(""), refresh())).pack(side=tk.LEFT)
@@ -6377,72 +6317,115 @@ Velocity:
 
     def on_show_shortcuts(self):
         """Show keyboard shortcuts"""
-        shortcuts_text = """Keyboard Shortcuts
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Keyboard Shortcuts")
+        dialog.geometry("520x500")
+        dialog.resizable(False, False)
+        dialog.transient(self.root)
+        dialog.grab_set()
+        dialog.configure(bg="#000000")
 
-File:
-  Ctrl+N        New Pattern
-  Ctrl+O        Open Pattern
-  Ctrl+S        Save
-  Ctrl+Shift+S  Save As
-  Ctrl+Q        Exit
+        outer = tk.Frame(dialog, bg="#000000", padx=16, pady=12)
+        outer.pack(fill=tk.BOTH, expand=True)
 
-Edit:
-  Ctrl+Z        Undo
-  Ctrl+Shift+Z  Redo
-  Ctrl+A        Select All
-  D/Backspace   Delete Selected
-  Right-Click   Delete Event (quick delete)
-  [             Decrease Velocity
-  ]             Increase Velocity
-  Ctrl+Shift+C  Copy Pattern
-  Ctrl+Shift+V  Paste Pattern
+        sections = [
+            ("FILE", [
+                ("Ctrl+N",        "New Pattern"),
+                ("Ctrl+O",        "Open Pattern"),
+                ("Ctrl+S",        "Save"),
+                ("Ctrl+Shift+S",  "Save As"),
+                ("Ctrl+Shift+L",  "Home Launcher"),
+                ("Ctrl+Q",        "Exit"),
+            ]),
+            ("EDIT", [
+                ("Ctrl+Z",        "Undo"),
+                ("Ctrl+Shift+Z",  "Redo"),
+                ("Ctrl+A",        "Select All"),
+                ("D / Del / Bksp","Delete Selected"),
+                ("Right-Click",   "Delete Event"),
+                ("[",             "Decrease Velocity"),
+                ("]",             "Increase Velocity"),
+                ("Ctrl+Shift+C",  "Copy Pattern"),
+                ("Ctrl+Shift+V",  "Paste Pattern"),
+            ]),
+            ("VIEW", [
+                ("Ctrl++",        "Zoom In"),
+                ("Ctrl+-",        "Zoom Out"),
+                ("Ctrl+0",        "Reset Zoom"),
+            ]),
+            ("NAVIGATION", [
+                ("Ctrl+Left",     "Previous Pattern"),
+                ("Ctrl+Right",    "Next Pattern"),
+            ]),
+            ("EDIT MODES", [
+                ("Draw",          "Click to add notes, drag to move, right-click to delete"),
+                ("Select",        "Click to select, drag to create selection rectangle"),
+                ("Erase",         "Click to delete notes"),
+            ]),
+        ]
 
-View:
-  Ctrl+ Zoom In
-  Ctrl- Zoom Out
-  Ctrl0 Reset Zoom
+        row = 0
+        for section_name, items in sections:
+            tk.Label(
+                outer, text=section_name,
+                font=("", 9, "bold"), bg="#000000", fg="#888888", anchor="w",
+            ).grid(row=row, column=0, columnspan=2, sticky="w", pady=(10 if row > 0 else 0, 3))
+            row += 1
+            for key, desc in items:
+                tk.Label(
+                    outer, text=key,
+                    font=("TkFixedFont", 10), bg="#000000", fg="#ffffff", anchor="w", width=17,
+                ).grid(row=row, column=0, sticky="w", padx=(10, 0))
+                tk.Label(
+                    outer, text=desc,
+                    font=("TkFixedFont", 10), bg="#000000", fg="#cccccc", anchor="w",
+                ).grid(row=row, column=1, sticky="w")
+                row += 1
 
-Navigation:
-  Ctrl+Left/Right   Previous/Next Pattern
-
-Edit Modes:
-  Draw Mode     Click to add notes, drag to move, right-click to delete
-  Select Mode   Click to select, drag rectangle
-  Erase Mode    Click to delete notes
-"""
-        messagebox.showinfo("Keyboard Shortcuts", shortcuts_text)
+        ttk.Button(outer, text="Close", command=dialog.destroy).grid(
+            row=row, column=0, columnspan=2, sticky="e", pady=(14, 0)
+        )
 
     def on_help_quick_start(self):
         """Show quick-start guide for beta users."""
-        quick_start = """Dr. Sidekick Quick Start (Beta)
+        quick_start = """Dr. Sidekick — Quick Start
 
-1. Pattern Editing
-Open app -> Edit Patterns.
-Use Draw mode to place events, Select mode to edit, Erase mode to remove.
-Save as PTNINFO0.SP0 + PTNDATA0.SP0 when done.
+Welcome! Here's everything you need to get going.
 
-2. Sample Management
-Open Samples -> Sample Management.
-Load Card Setup (SMPINFO0.SP0) from your card.
-Assign WAV or SP0 files to pads (C1-D8), then Write Changes to Card.
 
-3. Quick Import WAV Folder
-Open Samples -> Quick Import WAV Folder.
-Select a WAV (or folder). Output goes to BOSS DATA_OUTGOING.
-If more than 8 files, Dr. Sidekick creates BANK_LOAD_01, BANK_LOAD_02, etc.
-Import one bank-load folder at a time on the SP-303.
+1. Program a Pattern
+   Head to Home -> Edit Patterns (or just press Ctrl+Shift+L to open the launcher).
+   Pick a pattern slot (C1–D8), switch to Draw mode, and click the pad rows to
+   place your hits. Drag to move them, right-click to delete.
+   When you're happy, hit Ctrl+S to save.
 
-4. Library
-Open Library -> Manage Library.
-Use Add Project Pack or MIDI, then Load Selected from the list.
+   You can also import your own MIDI file via File -> Import MIDI File,
+   and apply a groove using Patterns -> Add Groove Pattern.
 
-5. Backup / Restore
-Use Backup Card and Load Backup in Sample Management, or from Home launcher.
 
-Recommended first run:
-Load your real SMPINFO0.SP0, test one pad reassignment only, write card, eject safely, verify on device.
+2. Load Samples onto Your Card
+   Got a folder of WAVs? Go to Samples -> Quick Import WAV Folder and point
+   it at your folder. Dr. Sidekick handles the conversion and drops everything
+   into BOSS DATA_OUTGOING ready to load onto the SP-303.
+
+   If you have more than 8 samples, they'll be split into BANK_LOAD_01,
+   BANK_LOAD_02 etc. — just load one bank at a time on the device.
+
+
+3. Reassign Pads (SmartMedia Manager)
+   Want to change which sample lives on which pad? Go to
+   Samples -> SmartMedia Manager, load your card setup, make your changes,
+   then hit Write Changes to Card.
+
+   Tip: always back up first — use Backup Card before making any changes.
+   If something doesn't look right, Restore Backup has you covered.
+
+
+First time? Start small.
+   Load your card setup, reassign just one pad, write to card, eject safely,
+   and check it on the hardware before going further.
 """
-        self.show_text_dialog("Quick Start", quick_start, geometry="980x620")
+        self.show_text_dialog("Quick Start", quick_start, geometry="980x580")
 
     def on_help_workflow_examples(self):
         """Show real-world workflow examples."""
@@ -6450,101 +6433,67 @@ Load your real SMPINFO0.SP0, test one pad reassignment only, write card, eject s
 
 
 ─────────────────────────────────────────────────────────────
-Example 1: Load TR-808 Kit with SP-1200 Groove
+Example 1: Load a Kit and Program a Pattern from Scratch
 ─────────────────────────────────────────────────────────────
 
-Goal: Put classic 808 drum sounds on the SP-303 pads and play
-      them back using a groove imported from an SP-1200 MIDI file.
+Goal: Get your own samples onto the SP-303 and program a beat
+      ready to play back on the hardware.
 
-Step 1 — Arrange your 808 samples in pad order.
-  SP-1200 grooves typically use General MIDI drum notes:
-    Kick  = MIDI 36   Snare = MIDI 38   Closed HH = MIDI 42
-    Open HH = MIDI 46   Rim = MIDI 37   Clap = MIDI 39
-  Dr. Sidekick will transpose these up 2 octaves (+24) so they
-  land on SP-303 pads:
-    36 -> 60 = Pad C1   38 -> 62 = Pad C3   42 -> 66 = Pad C7
-    46 -> 70 = Pad D3   37 -> 61 = Pad C2   39 -> 63 = Pad C4
-  Name your WAV files to sort into this pad order, e.g.:
-    01_kick.wav  02_snare.wav  03_rim.wav  04_clap.wav ...
-
-Step 2 — Load the 808 samples onto your card.
-  Home -> Quick Import WAV Folder -> select your 808 kit folder.
-  Files land in User-Library/BOSS DATA_OUTGOING.
+Step 1 — Load your samples onto the card.
+  Samples -> Quick Import WAV Folder -> select your kit folder.
+  Files are prepared in User-Library/BOSS DATA_OUTGOING.
   If more than 8 WAVs, load BANK_LOAD_01 first, then BANK_LOAD_02
-  on the device.
+  on the device. Samples land on pads A1–D8 in file order.
 
-Step 3 — Import the SP-1200 groove.
-  Home -> Edit Patterns.
-  File -> Import MIDI File -> select your SP-1200 MIDI export.
-  Choose the channel with the drum part (usually Ch 10).
-  When prompted about out-of-range notes: choose Transpose.
-  Dr. Sidekick finds the best octave shift automatically (+24 for
-  standard GM drum maps).
+Step 2 — Program the pattern.
+  Home -> Edit Patterns. Select a pattern slot (C1–D8).
+  Switch to Draw mode. Click pad rows to place hits.
+  Drag to move. Right-click to delete.
+  Set bar length with the Pattern Length spinner.
+  Adjust velocity by selecting notes and using [ / ] keys.
 
-Step 4 — Review in the pattern editor.
-  Verify events land on the expected pad rows.
-  Adjust velocity, timing, or length as needed.
+  Alternatively, import your own MIDI file:
+  File -> Import MIDI File -> select your file.
+  Review events in the editor and adjust as needed.
 
-Step 5 — Write to card.
-  File -> Save to Card Setup Folder.
+  Optionally apply a groove to the pattern:
+  Patterns -> Add Groove Pattern -> select your groove file.
+
+Step 3 — Save and load onto the SP-303.
+  File -> Save (Ctrl+S).
   Eject the card safely, insert into SP-303, and play.
 
-
-─────────────────────────────────────────────────────────────
-Example 2: Build a Pattern from Scratch, Then Batch-Import More
-─────────────────────────────────────────────────────────────
-
-Goal: Hand-program a pattern for slot C1, then fill slots C2–C8
-      from a set of MIDI loop exports in one pass.
-
-Step 1 — Draw the first pattern.
-  Home -> Edit Patterns.
-  Select slot C1. Switch to Draw mode.
-  Click or drag on pad rows to place hits; set bar length with the
-  Pattern Length spinner.
-
-Step 2 — Save.
-  File -> Save to Card Setup Folder (or Ctrl+S).
-
-Step 3 — Batch-import the remaining loops.
-  File -> Import MIDI Files (Batch).
-  Select all MIDI files at once (up to 15 for slots C2–D8).
-  Set starting pattern to C2.
-  Answer the out-of-range prompt once; it applies to all files.
-
-Step 4 — Review and write to card.
-  Flip through C2–D8 in the slot selector to spot-check.
-  File -> Save to Card Setup Folder.
+Note: A library of example MIDI patterns and grooves is planned for a future release.
 
 
 ─────────────────────────────────────────────────────────────
-Example 3: Reorganize a Card Without Losing Anything
+Example 2: Reorganize a Card Without Losing Anything
 ─────────────────────────────────────────────────────────────
 
 Goal: Safely reassign pads and shuffle patterns on an existing card.
 
 Step 1 — Back up first.
-  Home -> Backup Card. Choose your card path.
+  Samples -> SmartMedia Manager -> Backup Card.
   A timestamped backup folder is created in User-Library/Backups.
 
 Step 2 — Load the current card setup.
-  Sample Management -> Load Card Setup.
+  Samples -> SmartMedia Manager -> Load Card Setup.
   All current pad assignments appear in the table.
 
 Step 3 — Reassign pads.
-  Select a pad row, then use Assign WAV/SP0 or drag rows to reorder.
+  Select a pad row, then use Assign WAV/SP0 to swap samples.
   The status bar confirms every change.
 
 Step 4 — Remap or exchange patterns.
-  Open the pattern editor. Use Edit -> Copy Slot / Paste Slot to
-  move patterns between slots without re-importing.
+  Open the pattern editor. Use Edit -> Copy Pattern / Paste Pattern
+  to move patterns between slots without re-programming.
 
 Step 5 — Write changes.
-  Sample Management -> Write Changes to Card.
+  Samples -> SmartMedia Manager -> Write Changes to Card.
   Eject safely and verify on device.
-  If anything is wrong: Home -> Restore Backup to roll back.
+  If anything is wrong, restore from the backup created in Step 1.
 """
-        self.show_text_dialog("Workflow Examples", examples, geometry="980x720")
+        self.show_text_dialog("Workflow Examples", examples, geometry="980x560")
 
     def on_help_faq(self):
         """Show FAQ and troubleshooting notes for beta users."""
@@ -6557,42 +6506,16 @@ Q: Why do I get BANK_LOAD_01 folders?
 A: More than 8 WAV files were found. SP-303 loads one bank (8 samples) at a time.
 
 Q: Where are Quick Import files written?
-A: User-Library/BOSS DATA_OUTGOING.
+A: /Volumes/BOSS DATA or User-Library/BOSS DATA_OUTGOING.
 
 Q: Existing WAVs disappeared from BOSS DATA_OUTGOING.
-A: They are archived into wav_archive_YYYYMMDD_HHMMSS before overwrite.
-
-Q: "Permission denied: ./Dr_Sidekick.py"
-A: Run: chmod +x Dr_Sidekick.py
-Then run: ./Dr_Sidekick.py
-
-Q: Sample Management buttons seem unresponsive.
-A: Select a pad row first, then use Assign WAV/SP0/Clear Pad.
-Status bar updates confirm each action.
-
-Q: "Load Card Setup" warns about missing files.
-A: SMPINFO metadata loaded, but one or more SMPxxxxL/R.SP0 files were missing beside SMPINFO0.SP0.
+A: They are archived into the subfolder wav_archive_YYYYMMDD_HHMMSS.
 
 Q: Write Changes completed, but device did not reflect changes.
 A: Most common causes:
 - Card not ejected safely before inserting into SP-303
-- Wrong target output path selected
-- Card mount path mismatch (/Volumes/BOSS DATA vs BOSS DATA_OUTGOING)
+- Wrong target output path selected check in both /Volumes/BOSS DATA and /BOSS DATA_OUTGOING/
 
-Q: Why are some metadata columns shown as '-' in Sample Management?
-A: Long/Lo-Fi, Gate, Loop, Reverse, and DSP-effect editing are planned/future features.
-
-Q: Library says entries were added but I cannot find expected type.
-A: MIDI-only folders are cataloged as Groove packs.
-Project packs require a pack.json.
-
-Q: What should I include in a bug report?
-A: Include:
-1) exact action steps
-2) exact error text
-3) source path + output path used
-4) whether files were mono/stereo
-5) whether card was ejected safely
 """
         self.show_text_dialog("FAQ / Troubleshooting", faq, geometry="1024x680")
 
