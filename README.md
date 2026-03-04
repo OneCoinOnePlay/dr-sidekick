@@ -8,13 +8,38 @@
 
 ---
 
+![Home and Pattern Editor](screenshots/home-pattern-editor.png)
+
+![SmartMedia Manager](screenshots/smartmedia-manager.png)
+
+---
+
 ## What It Does
 
-- **Pattern Editor** — draw, edit, and arrange pad events on a piano-roll canvas; import from MIDI files
-- **Sample Management** — load a card setup (SMPINFO), reassign pads, write changes back to the SmartMedia card
-- **Quick Import WAV Folder** — prepare WAV sets for one-bank-at-a-time loading onto the SP-303
-- **Library Manager** — catalog and load sample packs and groove sets
-- **Backup / Restore** — create and restore full SP0 card backups
+**Pattern Editor** — draw, edit, and arrange pad events on a piano-roll canvas
+
+- 32 pad lanes across Banks A, B, C & D
+- Draw, Select, and Erase editing modes
+- Grid snapping: Free, 1/4, 1/8, 1/16, 1/32
+- Multi-select, velocity editing, and quantize
+- Copy/paste pattern slots, 50-level undo/redo
+- MIDI import with PPQN conversion; up to 16 files into consecutive slots in one operation
+- Apply SP-1200, MPC, Digitakt, or custom MIDI grooves
+- Hardware-verified byte-perfect output
+
+**SmartMedia Manager** — load a card setup, reassign pads, write changes back to the SmartMedia card
+
+- Import WAV/AIFF with automatic format conversion (24-bit → 16-bit, stereo → mono)
+- Auto-pad samples to 110ms minimum
+- Reassign archived .SP0 samples to different pads
+- Mix archived samples with new imports
+- Generates byte-perfect SMPINFO0.SP0 metadata
+
+**Quick Import WAV Folder** — prepare WAV sets for one-bank-at-a-time loading onto the SP-303
+
+**Pack Library** — catalog and load sample packs and groove sets *(coming soon)*
+
+**Backup / Restore** — create and restore full SP0 card backups
 
 ## Requirements
 
@@ -65,7 +90,7 @@ User-Library/
   Songs/
 ```
 
-The Library Manager indexes content here in `sp303_library_catalog.json`.
+The Pack Library indexes content here in `sp303_library_catalog.json`.
 
 ## License
 
