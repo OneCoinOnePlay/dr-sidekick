@@ -1,6 +1,6 @@
 # Dr. Sidekick
 
-Standalone graphical pattern editor and SmartMedia librarian for the **Boss SP-303 Dr. Sample**.
+**Boss Dr. Sample SP-303 ** Graphical pattern editor and SmartMedia librarian.
 
 ![Beta](https://img.shields.io/badge/status-beta-orange)
 ![Python 3](https://img.shields.io/badge/python-3.x-blue)
