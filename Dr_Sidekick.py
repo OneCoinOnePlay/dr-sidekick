@@ -1754,6 +1754,33 @@ class AssignmentSession:
         return lines
 
 
+def parse_mpc1000_pgm(pgm_path: Path) -> dict:
+    """Parse MPC1000 .pgm file, return {pad_index: sample_name} for assigned pads (0-63)."""
+    with open(pgm_path, 'rb') as f:
+        data = f.read()
+    header = data[4:20].decode('ascii', errors='ignore')
+    if 'MPC1000 PGM' not in header:
+        raise ValueError(f"Not a valid MPC1000 PGM file (header: {header!r})")
+    PAD_ENTRY_SIZE = 0xA4
+    FIRST_SAMPLE_OFFSET = 0x18
+    SAMPLE_NAME_SIZE = 16
+    pads = {}
+    for pad_index in range(64):
+        offset = FIRST_SAMPLE_OFFSET + pad_index * PAD_ENTRY_SIZE
+        if offset + SAMPLE_NAME_SIZE > len(data):
+            break
+        name = ''
+        for byte in data[offset:offset + SAMPLE_NAME_SIZE]:
+            if byte == 0:
+                break
+            if 32 <= byte <= 126:
+                name += chr(byte)
+        name = name.strip()
+        if name:
+            pads[pad_index] = name
+    return pads
+
+
 def find_wav_files(wav_dir: Path, recursive: bool = False) -> List[Path]:
     if recursive:
         wav_files = list(wav_dir.rglob("*.wav")) + list(wav_dir.rglob("*.WAV"))
@@ -3688,6 +3715,8 @@ class SP303PatternEditor:
         card_menu.add_command(label="Quick Import WAV Folder...", command=self.on_quick_import_card)
         card_menu.add_command(label="SmartMedia Manager...", command=self.on_custom_pad_assignment)
         card_menu.add_command(label="SmartMedia Library...", command=self.on_smartmedia_library)
+        card_menu.add_separator()
+        card_menu.add_command(label="Convert MPC1000 Program (.pgm)...", command=self.on_import_mpc1000)
         self.pattern_menu = pattern_menu
         self.samples_menu = card_menu
 
@@ -5290,6 +5319,106 @@ Velocity:
             )
         except Exception as exc:
             messagebox.showerror("Quick Import Error", str(exc))
+
+    def on_import_mpc1000(self):
+        """Convert MPC1000 .pgm program + WAV folder into a SmartMedia Library card."""
+        pgm_file = filedialog.askopenfilename(
+            title="Select MPC1000 Program (.pgm)",
+            filetypes=[("MPC1000 Program", "*.pgm *.PGM"), ("All Files", "*.*")],
+        )
+        if not pgm_file:
+            return
+        pgm_path = Path(pgm_file)
+
+        wav_dir_path = pgm_path.parent
+        if not find_wav_files(wav_dir_path, recursive=True):
+            wav_dir = filedialog.askdirectory(
+                title="No WAVs found next to .pgm — Select WAV Folder",
+                initialdir=str(pgm_path.parent),
+            )
+            if not wav_dir:
+                return
+            wav_dir_path = Path(wav_dir)
+
+        try:
+            pads = parse_mpc1000_pgm(pgm_path)
+        except ValueError as exc:
+            messagebox.showerror("MPC1000 Import Error", str(exc))
+            return
+
+        wav_files_in_dir = find_wav_files(wav_dir_path, recursive=True)
+
+        def find_wav_for_name(sample_name):
+            for f in wav_files_in_dir:
+                if f.stem == sample_name:
+                    return f
+            for f in wav_files_in_dir:
+                if f.stem.lower() == sample_name.lower():
+                    return f
+            for f in wav_files_in_dir:
+                if sample_name.lower() in f.stem.lower():
+                    return f
+            return None
+
+        self.smartmedia_lib.ensure_dirs()
+        card_name = "MPC1000"
+        card_dir = self.smartmedia_lib.cards_dir / card_name
+        if card_dir.exists():
+            shutil.rmtree(card_dir)
+        card_dir.mkdir(parents=True, exist_ok=True)
+        card = VirtualCard(name=card_name, tags=["mpc1000", pgm_path.stem])
+        self.smartmedia_lib.create_card(card)
+
+        prep = SP303CardPrep()
+        summary_lines = [f"Program: {pgm_path.name}", f"WAV folder: {wav_dir_path.name}", ""]
+        total_written = 0
+        not_found = []
+
+        for bank_idx, bank_name in enumerate("ABCDEFGH"):
+            bank_dir = card_dir / f"BANK_LOAD_{bank_idx + 1:02d}"
+            bank_lines = []
+            bank_has_samples = False
+
+            for slot in range(8):
+                pad_index = bank_idx * 8 + slot
+                sample_name = pads.get(pad_index)
+                smpl_name = f"SMPL{slot + 1:04d}.WAV"
+
+                if not sample_name:
+                    bank_lines.append(f"  {smpl_name}: (empty)")
+                    continue
+
+                wav = find_wav_for_name(sample_name)
+                if not wav:
+                    not_found.append(f"Bank {bank_name} pad {slot + 1}: {sample_name}")
+                    bank_lines.append(f"  {smpl_name}: NOT FOUND ({sample_name})")
+                    continue
+
+                bank_dir.mkdir(parents=True, exist_ok=True)
+                target = bank_dir / smpl_name
+                actions = prep._prepare_wav(wav, target)
+                action_str = f" [{', '.join(actions)}]" if actions else ""
+                bank_lines.append(f"  {smpl_name}: {wav.name}{action_str}")
+                total_written += 1
+                bank_has_samples = True
+
+            if bank_has_samples:
+                summary_lines.append(f"Bank {bank_name} (BANK_LOAD_{bank_idx + 1:02d}):")
+                summary_lines.extend(bank_lines)
+                summary_lines.append("")
+
+        summary_lines.append(f"Total samples written: {total_written}")
+        if not_found:
+            summary_lines.append(f"\nNot found ({len(not_found)}):")
+            summary_lines.extend(f"  {s}" for s in not_found)
+        summary_lines.append(f"\nSaved to: {card_dir}")
+        summary_lines.append("Load one BANK_LOAD folder at a time on the SP-303.")
+
+        self.show_text_dialog("MPC1000 Import Complete", "\n".join(summary_lines))
+        self.update_status(
+            f"MPC1000 import complete: {total_written} samples written to Cards/{card_name}"
+        )
+        log.info("MPC1000 import: %s -> Cards/%s (%d samples)", pgm_path.name, card_name, total_written)
 
     def on_smartmedia_library(self):
         """Virtual SmartMedia Library dialog."""
