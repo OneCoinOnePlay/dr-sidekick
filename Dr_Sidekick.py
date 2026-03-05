@@ -6708,7 +6708,18 @@ Welcome! Here's everything you need to get going.
    BANK_LOAD_02 etc. — just load one bank at a time on the device.
 
 
-3. Reassign Pads (SmartMedia Manager)
+3. Convert an MPC1000 Program
+   Got an MPC1000 .pgm file and its WAV samples? Go to
+   Samples -> Convert MPC1000 Program (.pgm) and select the .pgm file.
+   Dr. Sidekick finds the WAVs automatically (they're usually in the same
+   folder), maps all 64 pads to SP-303 banks, applies the same 110ms padding
+   and format fixes as Quick Import, and saves the result as a new virtual
+   card in SmartMedia-Library/Cards/MPC1000.
+
+   Load the BANK_LOAD folders onto your SP-303 one at a time.
+
+
+4. Reassign Pads (SmartMedia Manager)
    Want to change which sample lives on which pad? Go to
    Samples -> SmartMedia Manager, load your card setup, make your changes,
    then hit Write Changes to Card.
@@ -6763,7 +6774,34 @@ Note: A library of example MIDI patterns and grooves is planned for a future rel
 
 
 ─────────────────────────────────────────────────────────────
-Example 2: Reorganize a Card Without Losing Anything
+Example 2: Convert an MPC1000 Kit to SP-303
+─────────────────────────────────────────────────────────────
+
+Goal: Bring an MPC1000 drum program straight onto the SP-303,
+      preserving the original pad layout as closely as possible.
+
+Step 1 — Samples -> Convert MPC1000 Program (.pgm).
+  Select the .pgm file. If the WAV samples are in the same folder
+  (or a subfolder), no further prompt appears.
+  If WAVs live elsewhere, a folder picker opens.
+
+Step 2 — Review the results dialog.
+  Each bank (A–H) shows which WAV landed on which SMPL slot.
+  NOT FOUND entries mean the .pgm referenced a sample name that
+  wasn't matched in the WAV folder — check spelling or relocate.
+
+Step 3 — Load onto the SP-303.
+  Open SmartMedia-Library/Cards/MPC1000 in Finder.
+  Copy BANK_LOAD_01 contents (SMPL0001–SMPL0008.WAV) to your card.
+  On the SP-303 select the target bank and run Import.
+  Repeat for each BANK_LOAD folder.
+
+Note: Each run of Convert MPC1000 overwrites the MPC1000 card.
+  Use Samples -> SmartMedia Library to snapshot it first if needed.
+
+
+─────────────────────────────────────────────────────────────
+Example 3: Reorganize a Card Without Losing Anything
 ─────────────────────────────────────────────────────────────
 
 Goal: Safely reassign pads and shuffle patterns on an existing card.
@@ -6811,6 +6849,22 @@ Q: Write Changes completed, but device did not reflect changes.
 A: Most common causes:
 - Card not ejected safely before inserting into SP-303
 - Wrong target output path selected check in both /Volumes/BOSS DATA and /BOSS DATA_OUTGOING/
+
+Q: I used Convert MPC1000 Program and some pads say NOT FOUND.
+A: The .pgm stores sample names without file extensions, and matching is
+   done by filename stem. Check that your WAV filenames match the names
+   stored in the .pgm (case-insensitive partial matches are tried too).
+   If WAVs are in a different folder, re-run and point to the correct folder
+   when the folder picker appears.
+
+Q: Convert MPC1000 Program only shows a few banks — where are the rest?
+A: Only banks that contain at least one matched sample are written.
+   Empty banks are skipped. Pads with no assignment or unresolved samples
+   are listed per-slot in the results dialog.
+
+Q: I ran Convert MPC1000 twice and my first import is gone.
+A: Each run overwrites SmartMedia-Library/Cards/MPC1000. Use
+   Samples -> SmartMedia Library to create a snapshot before re-running.
 
 """
         self.show_text_dialog("FAQ / Troubleshooting", faq, geometry="1024x680")
