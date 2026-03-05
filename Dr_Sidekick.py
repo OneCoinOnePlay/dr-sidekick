@@ -2023,7 +2023,7 @@ SLOT_COUNT = 16
 DEFAULT_PATTERN_LENGTH_BARS = 4  # Default pattern length
 MAX_PATTERN_LENGTH_BARS = 99  # SP-303 hardware maximum
 TUPLE_ZONE_MAX_BYTES = 0x272 - 0x70  # PTNDATA event payload capacity per pattern slot
-APP_VERSION = "0.2.1"
+APP_VERSION = "0.3.0"
 
 
 def load_midi_notes_by_channel(midi_path: str) -> Tuple[Dict[int, List[Tuple[int, int, int]]], int]:
