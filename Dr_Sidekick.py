@@ -5361,12 +5361,12 @@ Velocity:
             return None
 
         self.smartmedia_lib.ensure_dirs()
-        card_name = "MPC1000"
+        card_name = pgm_path.stem
         card_dir = self.smartmedia_lib.cards_dir / card_name
         if card_dir.exists():
             shutil.rmtree(card_dir)
         card_dir.mkdir(parents=True, exist_ok=True)
-        card = VirtualCard(name=card_name, tags=["mpc1000", pgm_path.stem])
+        card = VirtualCard(name=card_name, tags=["mpc1000"])
         self.smartmedia_lib.create_card(card)
 
         prep = SP303CardPrep()
@@ -6714,7 +6714,7 @@ Welcome! Here's everything you need to get going.
    Dr. Sidekick finds the WAVs automatically (they're usually in the same
    folder), maps all 64 pads to SP-303 banks, applies the same 110ms padding
    and format fixes as Quick Import, and saves the result as a new virtual
-   card in SmartMedia-Library/Cards/MPC1000.
+   card named after the .pgm file in SmartMedia-Library/Cards/.
 
    Load the BANK_LOAD folders onto your SP-303 one at a time.
 
@@ -6791,13 +6791,13 @@ Step 2 — Review the results dialog.
   wasn't matched in the WAV folder — check spelling or relocate.
 
 Step 3 — Load onto the SP-303.
-  Open SmartMedia-Library/Cards/MPC1000 in Finder.
+  Open SmartMedia-Library/Cards/<pgm name> in Finder.
   Copy BANK_LOAD_01 contents (SMPL0001–SMPL0008.WAV) to your card.
   On the SP-303 select the target bank and run Import.
   Repeat for each BANK_LOAD folder.
 
-Note: Each run of Convert MPC1000 overwrites the MPC1000 card.
-  Use Samples -> SmartMedia Library to snapshot it first if needed.
+Note: Each .pgm gets its own card named after the program file.
+  Re-running with the same .pgm overwrites that card only.
 
 
 ─────────────────────────────────────────────────────────────
@@ -6862,9 +6862,9 @@ A: Only banks that contain at least one matched sample are written.
    Empty banks are skipped. Pads with no assignment or unresolved samples
    are listed per-slot in the results dialog.
 
-Q: I ran Convert MPC1000 twice and my first import is gone.
-A: Each run overwrites SmartMedia-Library/Cards/MPC1000. Use
-   Samples -> SmartMedia Library to create a snapshot before re-running.
+Q: I ran Convert MPC1000 twice with different programs and both are there.
+A: Correct — each .pgm gets its own card named after the program file.
+   Re-running with the same .pgm overwrites that card only.
 
 """
         self.show_text_dialog("FAQ / Troubleshooting", faq, geometry="1024x680")
