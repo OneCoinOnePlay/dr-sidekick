@@ -3,6 +3,8 @@
 Dr. Sidekick - Standalone graphical pattern editor and SmartMedia librarian for the BOSS Dr. Sample SP-303
 ==========================================================================================================
 
+Disclaimer: Dr. Sidekick is an independent community project and is not affiliated with, endorsed by, or supported by Roland Corporation or BOSS
+
 Author: One Coin One Play
 github.com/OneCoinOnePlay
 """
@@ -15,6 +17,8 @@ from dataclasses import asdict, dataclass, field
 from copy import deepcopy
 from datetime import datetime
 from enum import Enum
+import logging
+from logging.handlers import RotatingFileHandler
 import math
 import sys
 import random
@@ -22,10 +26,23 @@ import struct
 import json
 import shutil
 import textwrap
+import traceback
 import urllib.error
 import urllib.request
 import threading
 import wave
+
+# ── Session logger ────────────────────────────────────────────────────────────
+_LOG_PATH = Path(__file__).parent / "Dr_Sidekick.log"
+_log_handler = RotatingFileHandler(
+    _LOG_PATH, maxBytes=1_000_000, backupCount=2, encoding="utf-8"
+)
+_log_handler.setFormatter(logging.Formatter(
+    "%(asctime)s %(levelname)-8s %(message)s", datefmt="%Y-%m-%d %H:%M:%S"
+))
+log = logging.getLogger("dr_sidekick")
+log.setLevel(logging.DEBUG)
+log.addHandler(_log_handler)
 
 try:
     from tkinterdnd2 import DND_FILES, TkinterDnD
@@ -72,7 +89,8 @@ class GrooveTiming:
     """Groove timing template"""
     name: str
     timings: List[int]
-    
+    author: str = ""
+
     @classmethod
     def from_midi(cls, midi_path: Path) -> 'GrooveTiming':
         """Load groove from MIDI file"""
@@ -772,7 +790,8 @@ class SlotRecord:
     0x20-0x23 (4 bytes):  dsp_const   — always 0x113A06xx (xx = 0x7F default)
     0x24      (1 byte):   stereo      — 0x00 = mono, 0x01 = stereo
     0x25      (1 byte):   gate        — 0x00 = normal, 0x01 = gate on
-    0x26-0x27 (2 bytes):  (zeros)
+    0x26      (1 byte):   loop        — 0x00 = no loop, 0x01 = loop on
+    0x27      (1 byte):   reverse     — 0x00 = normal, 0x01 = reverse on
     0x28-0x2B (4 bytes):  (const)     — always 0x00004000
     0x2C-0x2F (4 bytes):  (const)     — always 0x03000000
     """
@@ -782,6 +801,8 @@ class SlotRecord:
     is_stereo: bool
     params_word: int = SP303_DEFAULT_PARAMS  # 16-bit clock divider; sample_rate = 37_500_000 / params_word
     is_gate: bool = False              # Gate playback mode (byte 0x25)
+    is_loop: bool = False              # Loop playback mode (byte 0x26)
+    is_reverse: bool = False           # Reverse playback mode (byte 0x27)
     reserved_0_11: bytes = bytes(12)  # Reserved bytes 0-11
     
     @property
@@ -848,7 +869,11 @@ class SlotRecord:
         # Byte 37: Gate flag
         record[37] = 0x01 if self.is_gate else 0x00
 
-        # Bytes 38-39: Reserved (zeros) — already zero from bytearray init
+        # Byte 38: Loop flag
+        record[38] = 0x01 if self.is_loop else 0x00
+
+        # Byte 39: Reverse flag
+        record[39] = 0x01 if self.is_reverse else 0x00
         
         # Bytes 40-43: Constant
         record[40:44] = TEMPLATE_BYTES_40_43
@@ -872,6 +897,8 @@ class SlotRecord:
         params_word = struct.unpack('>H', data[28:30])[0] or SP303_DEFAULT_PARAMS
         is_stereo = data[36] == 0x01
         is_gate = data[37] == 0x01
+        is_loop = data[38] == 0x01
+        is_reverse = data[39] == 0x01
 
         return cls(
             slot_index=slot_index,
@@ -880,6 +907,8 @@ class SlotRecord:
             is_stereo=is_stereo,
             params_word=params_word,
             is_gate=is_gate,
+            is_loop=is_loop,
+            is_reverse=is_reverse,
             reserved_0_11=reserved_0_11
         )
     
@@ -888,8 +917,10 @@ class SlotRecord:
         pad_str = f"Pad {self.pad}"
         type_str = "Stereo" if self.is_stereo else "Mono"
         gate_str = " Gate" if self.is_gate else ""
+        loop_str = " Loop" if self.is_loop else ""
+        rev_str = " Reverse" if self.is_reverse else ""
         status = "Empty" if self.is_empty else f"{self.sample_length_bytes}B"
-        return f"Slot {self.slot_index:2d} ({bank_str}, {pad_str}): {type_str:6s}{gate_str} {status}"
+        return f"Slot {self.slot_index:2d} ({bank_str}, {pad_str}): {type_str:6s}{gate_str}{loop_str}{rev_str} {status}"
 
 
 @dataclass
@@ -956,7 +987,8 @@ class SMPINFO:
         self.reserved_0x360 = b'\x00' * 32  # All 0x00
     
     def set_slot(self, slot_index: int, sample_length: int, is_stereo: bool = False,
-                 loop_point: Optional[int] = None, is_gate: bool = False):
+                 loop_point: Optional[int] = None, is_gate: bool = False, is_loop: bool = False,
+                 is_reverse: bool = False):
         """
         Set a slot's parameters
 
@@ -966,6 +998,8 @@ class SMPINFO:
             is_stereo: True for stereo (L+R files), False for mono
             loop_point: Loop point in bytes, or None for no loop (one-shot)
             is_gate: True to enable gate playback mode
+            is_loop: True to enable loop playback mode
+            is_reverse: True to enable reverse playback mode
         """
         if not 0 <= slot_index < SLOT_COUNT:
             raise ValueError(f"Slot index must be 0-15, got {slot_index}")
@@ -979,6 +1013,8 @@ class SMPINFO:
             loop_point_bytes=loop_point,
             is_stereo=is_stereo,
             is_gate=is_gate,
+            is_loop=is_loop,
+            is_reverse=is_reverse,
         )
     
     def clear_slot(self, slot_index: int):
@@ -1026,30 +1062,44 @@ class SMPINFO:
         """Parse complete SMPINFO0.SP0 file"""
         if len(data) != FILE_SIZE:
             raise ValueError(f"SMPINFO0.SP0 must be {FILE_SIZE} bytes, got {len(data)}")
-        
+
+        # The SP-303 uses a sequential write log: each settings change appends a new
+        # 0x400-byte block. The current state is always in the last written block
+        # (first block whose opening 4 bytes are 0xFFFFFFFF is unwritten; the one
+        # before it is current). Files produced by Dr. Sidekick only write block 0,
+        # so this logic is safe for both origins.
+        block_size = 0x400
+        num_blocks = FILE_SIZE // block_size
+        last_written = 0
+        for b in range(num_blocks):
+            if data[b * block_size : b * block_size + 4] == b'\xff\xff\xff\xff':
+                break
+            last_written = b
+        base = last_written * block_size
+
         smpinfo = cls()
-        
+
         # Parse slot records
         smpinfo.slots = []
         for i in range(SLOT_COUNT):
-            offset = SLOT_RECORDS_START + (i * SLOT_RECORDS_SIZE)
+            offset = base + SLOT_RECORDS_START + (i * SLOT_RECORDS_SIZE)
             slot_data = data[offset:offset + SLOT_RECORDS_SIZE]
             smpinfo.slots.append(SlotRecord.from_bytes(i, slot_data))
-        
+
         # Parse pad mappings
         smpinfo.pad_mappings = []
         for i in range(SLOT_COUNT):
-            offset = PAD_MAPPING_START + (i * 4)
+            offset = base + PAD_MAPPING_START + (i * 4)
             mapping_data = data[offset:offset + 4]
             smpinfo.pad_mappings.append(PadMapping.from_bytes(mapping_data))
-        
+
         # Parse reserved sections
-        smpinfo.reserved_0x340 = data[0x0340:0x0360]
-        smpinfo.reserved_0x360 = data[0x0360:0x0380]
-        
+        smpinfo.reserved_0x340 = data[base + 0x0340 : base + 0x0360]
+        smpinfo.reserved_0x360 = data[base + 0x0360 : base + 0x0380]
+
         # Parse DSP commands
-        smpinfo.dsp_commands = data[DSP_COMMANDS_START:DSP_COMMANDS_START + DSP_COMMANDS_SIZE]
-        
+        smpinfo.dsp_commands = data[base + DSP_COMMANDS_START : base + DSP_COMMANDS_START + DSP_COMMANDS_SIZE]
+
         return smpinfo
     
     @classmethod
@@ -1328,56 +1378,37 @@ class SP303CardPrep:
                 smpinfo.set_slot(source.slot_index, source.sample_length, source.is_stereo)
 
         if archived_copy_ops:
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            backup_root = Path(__file__).parent / "Backup"
-            stage_dir = backup_root / f".dr_sidekick_stage_{timestamp}"
-            backup_dir = backup_root / f"dr_sidekick_backup_{timestamp}"
-
+            import tempfile
             stage_bytes_needed = sum(source_path.stat().st_size for source_path, _, _ in archived_copy_ops)
-            backup_bytes_needed = sum(
-                target_path.stat().st_size
-                for source_path, target_path, _ in archived_copy_ops
-                if target_path.exists() and not same_file(source_path, target_path)
-            )
-            backup_root.mkdir(parents=True, exist_ok=True)
-            free_bytes = shutil.disk_usage(backup_root).free
-            required_bytes = stage_bytes_needed + backup_bytes_needed
-            if free_bytes < required_bytes:
+            free_bytes = shutil.disk_usage(output_dir).free
+            if free_bytes < stage_bytes_needed:
                 raise RuntimeError(
-                    "Not enough free space for Prepare Card staging/backup. "
-                    f"Required: {required_bytes:,} bytes, available: {free_bytes:,} bytes."
+                    "Not enough free space on output device. "
+                    f"Required: {stage_bytes_needed:,} bytes, available: {free_bytes:,} bytes."
                 )
 
-            stage_dir.mkdir(parents=True, exist_ok=True)
+            stage_dir = Path(tempfile.mkdtemp(prefix="dr_sidekick_stage_"))
+            try:
+                staged_ops: List[Tuple[Path, Path, str]] = []
+                for idx, (source_path, target_path, target_name) in enumerate(archived_copy_ops):
+                    if not source_path.exists():
+                        raise FileNotFoundError(f"SP0 file not found: {source_path}")
+                    staged_path = stage_dir / f"{idx:04d}_{source_path.name}"
+                    shutil.copyfile(source_path, staged_path)
+                    staged_ops.append((staged_path, target_path, target_name))
 
-            staged_ops: List[Tuple[Path, Path, str, Path]] = []
-            for idx, (source_path, target_path, target_name) in enumerate(archived_copy_ops):
-                if not source_path.exists():
-                    raise FileNotFoundError(f"SP0 file not found: {source_path}")
-                staged_path = stage_dir / f"{idx:04d}_{source_path.name}"
-                shutil.copyfile(source_path, staged_path)
-                staged_ops.append((staged_path, target_path, target_name, source_path))
+                overwritten_count = 0
+                for staged_path, target_path, target_name in staged_ops:
+                    if target_path.exists():
+                        overwritten_count += 1
+                    shutil.copyfile(staged_path, target_path)
+                    results['archived_sp0_copied'].append(target_name)
+            finally:
+                shutil.rmtree(stage_dir, ignore_errors=True)
 
-            overwritten_count = 0
-            for _, target_path, _, source_path in staged_ops:
-                if target_path.exists() and not same_file(source_path, target_path):
-                    backup_dir.mkdir(parents=True, exist_ok=True)
-                    backup_target = backup_dir / target_path.name
-                    suffix = 1
-                    while backup_target.exists():
-                        backup_target = backup_dir / f"{target_path.stem}_{suffix}{target_path.suffix}"
-                        suffix += 1
-                    shutil.copyfile(target_path, backup_target)
-                    overwritten_count += 1
-
-            for staged_path, target_path, target_name, _ in staged_ops:
-                shutil.copyfile(staged_path, target_path)
-                results['archived_sp0_copied'].append(target_name)
-
-            shutil.rmtree(stage_dir, ignore_errors=True)
             if overwritten_count > 0:
                 results['warnings'].append(
-                    f"Backed up {overwritten_count} overwritten file(s) to {backup_dir}"
+                    f"Overwrote {overwritten_count} existing SP0 file(s) on card. Snapshot taken before write."
                 )
         
         # Process WAV files
@@ -1569,166 +1600,131 @@ class SP303CardPrep:
         
         return prep
 
-class LibraryType(Enum):
-    DRUM_MACHINE = "drum_machine"
-    GROOVE_PACK = "groove_pack"
-    SONG = "song"
-    TEMPLATE = "template"
-
 
 @dataclass
-class LibraryEntry:
+class VirtualCard:
     name: str
-    type: LibraryType
-    path: Path
-    description: str = ""
+    device: str = "SP-303"
     author: str = ""
-    tags: List[str] = None
-    sample_count: int = 0
-    pattern_count: int = 0
-    banks_used: List[str] = None
-
-    def __post_init__(self):
-        if self.tags is None:
-            self.tags = []
-        if self.banks_used is None:
-            self.banks_used = []
-
-    @classmethod
-    def from_dict(cls, data: dict) -> "LibraryEntry":
-        payload = dict(data)
-        payload["type"] = LibraryType(payload["type"])
-        payload["path"] = Path(payload["path"])
-        return cls(**payload)
+    categories: List[str] = field(default_factory=list)
+    tags: List[str] = field(default_factory=list)
+    write_protect: bool = False
+    created: str = ""
+    modified: str = ""
+    path: Path = field(default_factory=Path)
 
     def to_dict(self) -> dict:
-        payload = asdict(self)
-        payload["type"] = self.type.value
-        payload["path"] = str(self.path)
-        return payload
-
-
-class LibraryManager:
-    def __init__(self, catalog_path: Optional[Path] = None):
-        self.catalog_path = catalog_path or (Path(__file__).parent / "sp303_library_catalog.json")
-        self.catalog_path.parent.mkdir(parents=True, exist_ok=True)
-        self.entries: List[LibraryEntry] = []
-        self.load()
-
-    def load(self):
-        if not self.catalog_path.exists():
-            self.entries = []
-            return
-
-        try:
-            with open(self.catalog_path, "r", encoding="utf-8") as handle:
-                data = json.load(handle)
-            self.entries = [LibraryEntry.from_dict(entry) for entry in data.get("entries", [])]
-        except Exception:
-            self.entries = []
-
-    def save(self):
-        data = {
-            "version": "2.0",
-            "entries": [entry.to_dict() for entry in self.entries],
+        return {
+            "name": self.name, "device": self.device, "author": self.author,
+            "categories": self.categories, "tags": self.tags,
+            "write_protect": self.write_protect,
+            "created": self.created, "modified": self.modified,
         }
-        with open(self.catalog_path, "w", encoding="utf-8") as handle:
-            json.dump(data, handle, indent=2)
 
-    def _upsert_entry(self, entry: LibraryEntry):
-        self.entries = [
-            existing
-            for existing in self.entries
-            if not (existing.name == entry.name and existing.type == entry.type)
-        ]
-        self.entries.append(entry)
+    @classmethod
+    def from_dict(cls, d: dict, path: Path) -> "VirtualCard":
+        return cls(
+            name=d.get("name", path.name), device=d.get("device", "SP-303"),
+            author=d.get("author", ""), categories=d.get("categories", []),
+            tags=d.get("tags", []), write_protect=d.get("write_protect", False),
+            created=d.get("created", ""), modified=d.get("modified", ""),
+            path=path,
+        )
 
-    def add_entry(self, entry: LibraryEntry):
-        self._upsert_entry(entry)
-        self.save()
 
-    def add_entries(self, entries: List[LibraryEntry]):
-        for entry in entries:
-            self._upsert_entry(entry)
-        self.save()
+class SmartMediaLibrary:
+    def __init__(self, root: Path):
+        self.root = root
+        self.cards_dir = root / "Cards"
+        self.autosaves_dir = root / "AutoSaves"
+        self.incoming_dir = root / "BOSS DATA_INCOMING"
+        self.outgoing_dir = root / "BOSS DATA_OUTGOING"
 
-    def remove_entry(self, name: str):
-        self.entries = [entry for entry in self.entries if entry.name != name]
-        self.save()
+    def ensure_dirs(self):
+        for d in (self.cards_dir, self.autosaves_dir, self.incoming_dir, self.outgoing_dir):
+            d.mkdir(parents=True, exist_ok=True)
 
-    def get_entries_by_type(self, library_type: LibraryType) -> List[LibraryEntry]:
-        return [entry for entry in self.entries if entry.type == library_type]
-
-    def search(self, query: str) -> List[LibraryEntry]:
-        query_lower = query.lower()
-        return [
-            entry
-            for entry in self.entries
-            if query_lower in entry.name.lower()
-            or any(query_lower in tag.lower() for tag in entry.tags)
-        ]
-
-    def scan_directory(self, directory: Path, library_type: LibraryType) -> List[LibraryEntry]:
-        found_entries: List[LibraryEntry] = []
-        if not directory.exists() or not directory.is_dir():
-            return found_entries
-
-        if library_type == LibraryType.DRUM_MACHINE:
-            for subfolder in directory.iterdir():
-                if not subfolder.is_dir():
-                    continue
-                wav_files = sorted(list(subfolder.glob("*.wav")) + list(subfolder.glob("*.WAV")))
-                if wav_files:
-                    found_entries.append(
-                        LibraryEntry(
-                            name=subfolder.name,
-                            type=LibraryType.DRUM_MACHINE,
-                            path=subfolder,
-                            sample_count=len(wav_files),
-                            description=f"{len(wav_files)} samples",
-                        )
-                    )
-
-        elif library_type == LibraryType.GROOVE_PACK:
-            for subfolder in directory.iterdir():
-                if not subfolder.is_dir():
-                    continue
-                mid_files = sorted(list(subfolder.glob("*.mid")) + list(subfolder.glob("*.MID")))
-                if mid_files:
-                    found_entries.append(
-                        LibraryEntry(
-                            name=subfolder.name,
-                            type=LibraryType.GROOVE_PACK,
-                            path=subfolder,
-                            pattern_count=len(mid_files),
-                            description=f"{len(mid_files)} grooves",
-                        )
-                    )
-
-        elif library_type in {LibraryType.SONG, LibraryType.TEMPLATE}:
-            for subfolder in directory.iterdir():
-                if not subfolder.is_dir():
-                    continue
-                manifest = subfolder / "pack.json"
-                if not manifest.exists():
-                    continue
+    def list_cards(self) -> List["VirtualCard"]:
+        cards = []
+        if not self.cards_dir.exists():
+            return cards
+        for card_dir in sorted(self.cards_dir.iterdir()):
+            if not card_dir.is_dir():
+                continue
+            json_path = card_dir / "card.json"
+            if json_path.exists():
                 try:
-                    with open(manifest, "r", encoding="utf-8") as handle:
-                        pack_data = json.load(handle)
-                    found_entries.append(
-                        LibraryEntry(
-                            name=pack_data.get("name", subfolder.name),
-                            type=library_type,
-                            path=subfolder,
-                            description=pack_data.get("description", ""),
-                            author=pack_data.get("author", ""),
-                            tags=pack_data.get("tags", []),
-                        )
-                    )
+                    with open(json_path, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                    cards.append(VirtualCard.from_dict(data, card_dir))
                 except Exception:
                     continue
+        return cards
 
-        return found_entries
+    def get_card(self, name: str) -> Optional["VirtualCard"]:
+        card_dir = self.cards_dir / name
+        json_path = card_dir / "card.json"
+        if not json_path.exists():
+            return None
+        try:
+            with open(json_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            return VirtualCard.from_dict(data, card_dir)
+        except Exception:
+            return None
+
+    def create_card(self, card: "VirtualCard"):
+        card_dir = self.cards_dir / card.name
+        card_dir.mkdir(parents=True, exist_ok=True)
+        card.path = card_dir
+        if not card.created:
+            card.created = datetime.now().isoformat(timespec="seconds")
+        card.modified = datetime.now().isoformat(timespec="seconds")
+        with open(card_dir / "card.json", "w", encoding="utf-8") as f:
+            json.dump(card.to_dict(), f, indent=2)
+
+    def save_card(self, card: "VirtualCard"):
+        card.modified = datetime.now().isoformat(timespec="seconds")
+        with open(card.path / "card.json", "w", encoding="utf-8") as f:
+            json.dump(card.to_dict(), f, indent=2)
+
+    def delete_card(self, name: str):
+        card_dir = self.cards_dir / name
+        if card_dir.exists():
+            shutil.rmtree(card_dir)
+
+    def list_snapshots(self, card_name: str) -> List[Path]:
+        snap_dir = self.autosaves_dir / card_name
+        if not snap_dir.exists():
+            return []
+        snaps = sorted([d for d in snap_dir.iterdir() if d.is_dir()], reverse=True)
+        return snaps
+
+    def create_snapshot(self, card_name: str, label: str = "") -> Path:
+        ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        folder_name = f"{ts}_{label}" if label else ts
+        snap_dir = self.autosaves_dir / card_name / folder_name
+        snap_dir.mkdir(parents=True, exist_ok=True)
+        card_dir = self.cards_dir / card_name
+        if card_dir.exists():
+            for f in card_dir.iterdir():
+                if f.is_file():
+                    shutil.copy2(f, snap_dir / f.name)
+        log.info("Snapshot created: %s", snap_dir)
+        return snap_dir
+
+    def rename_snapshot(self, card_name: str, snapshot_path: Path, new_label: str):
+        ts = snapshot_path.name.split("_")[0] if "_" in snapshot_path.name else snapshot_path.name
+        new_name = f"{ts}_{new_label}" if new_label else ts
+        new_path = snapshot_path.parent / new_name
+        snapshot_path.rename(new_path)
+        return new_path
+
+    def restore_snapshot(self, snapshot_path: Path, card: "VirtualCard", target_dir: Path):
+        target_dir.mkdir(parents=True, exist_ok=True)
+        for f in snapshot_path.iterdir():
+            if f.is_file():
+                shutil.copy2(f, target_dir / f.name)
 
 
 class AssignmentSession:
@@ -1962,27 +1958,6 @@ def archive_card_as_song(
     }
 
 
-def add_song_pack_to_library(library: LibraryManager, pack_dir: Path) -> LibraryEntry:
-    manifest = pack_dir / "pack.json"
-    if not manifest.exists():
-        raise ValueError(f"No pack.json found in {pack_dir}")
-
-    with open(manifest, "r", encoding="utf-8") as handle:
-        pack_data = json.load(handle)
-
-    pack_type = LibraryType.TEMPLATE if pack_data.get("type") == "template" else LibraryType.SONG
-    entry = LibraryEntry(
-        name=pack_data.get("title", pack_dir.name),
-        type=pack_type,
-        path=pack_dir,
-        description=pack_data.get("description", ""),
-        author=pack_data.get("arranged_by", pack_data.get("author", "")),
-        tags=pack_data.get("tags", []),
-    )
-    library.add_entry(entry)
-    return entry
-
-
 def load_song_pack(pack_dir: Path, output_dir: Path) -> Dict:
     manifest_path = pack_dir / "pack.json"
     if not manifest_path.exists():
@@ -2042,33 +2017,13 @@ def load_song_pack(pack_dir: Path, output_dir: Path) -> Dict:
     }
 
 
-def load_library_entry(entry: LibraryEntry, output_dir: Path) -> Dict:
-    if entry.type in {LibraryType.SONG, LibraryType.TEMPLATE}:
-        return load_song_pack(entry.path, output_dir)
-
-    if entry.type == LibraryType.DRUM_MACHINE:
-        wav_files = find_wav_files(entry.path)
-        if not wav_files:
-            raise ValueError("No WAV files found")
-        prep = SP303CardPrep()
-        for slot, wav_file in enumerate(wav_files[:16]):
-            prep.assign_wav_for_import(slot, wav_file)
-        results = prep.prepare_card(output_dir)
-        return {"results": results, "loaded_items": [path.name for path in wav_files[:16]]}
-
-    if entry.type == LibraryType.GROOVE_PACK:
-        grooves = sorted(list(entry.path.glob("*.mid")) + list(entry.path.glob("*.MID")))
-        return {"grooves": grooves}
-
-    raise ValueError(f"Unsupported library entry type: {entry.type.value}")
-
 # Constants
 INTERNAL_PPQN = 96
 SLOT_COUNT = 16
 DEFAULT_PATTERN_LENGTH_BARS = 4  # Default pattern length
 MAX_PATTERN_LENGTH_BARS = 99  # SP-303 hardware maximum
 TUPLE_ZONE_MAX_BYTES = 0x272 - 0x70  # PTNDATA event payload capacity per pattern slot
-APP_VERSION = "0.2.0"
+APP_VERSION = "0.2.1"
 
 
 def load_midi_notes_by_channel(midi_path: str) -> Tuple[Dict[int, List[Tuple[int, int, int]]], int]:
@@ -2308,7 +2263,7 @@ COLOR_PALETTES = {
 }
 
 # Default color scheme
-COLORS = COLOR_PALETTES["Apple Green"]
+COLORS = COLOR_PALETTES["High Contrast (White on Black)"]
 
 
 @dataclass
@@ -3501,7 +3456,7 @@ class SP303PatternEditor:
     def __init__(self, root, debug_mode: bool = False):
         self.root = root
         self.debug_mode = debug_mode
-        self.root.title("Dr. Sidekick")
+        self.root.title("Dr. Sidekick by One Coin One Play")
 
         # Calculate window height: toolbar (~40) + ruler (25) + 32 lanes + statusbar (~25) + padding
         window_height = 40 + 25 + (32 * 25) + 25 + 30  # ~920 pixels
@@ -3591,10 +3546,11 @@ class SP303PatternEditor:
         self.model = PatternModel()
         self.current_palette = "Apple Green"
         self.slot_combo: Optional[ttk.Combobox] = None
-        self.user_library_root = Path(__file__).parent / "User-Library"
-        self.user_library_root.mkdir(parents=True, exist_ok=True)
-        self.library = LibraryManager(self.user_library_root / "library_catalog.json")
-        self.ensure_user_library_dirs()
+        self.smartmedia_library_root = Path(__file__).parent / "SmartMedia-Library"
+        self.smartmedia_library_root.mkdir(parents=True, exist_ok=True)
+        self.smartmedia_lib = SmartMediaLibrary(self.smartmedia_library_root)
+        self.load_config()
+        self.ensure_library_dirs()
         self.active_workflow = "Patterns"
         self.loaded_card_context = "Not loaded"
 
@@ -3731,8 +3687,7 @@ class SP303PatternEditor:
         menubar.add_cascade(label="Samples", menu=card_menu)
         card_menu.add_command(label="Quick Import WAV Folder...", command=self.on_quick_import_card)
         card_menu.add_command(label="SmartMedia Manager...", command=self.on_custom_pad_assignment)
-        card_menu.add_separator()
-        card_menu.add_command(label="Pack Library... (Coming Soon)", command=self.on_manage_library, state=tk.DISABLED)
+        card_menu.add_command(label="SmartMedia Library...", command=self.on_smartmedia_library)
         self.pattern_menu = pattern_menu
         self.samples_menu = card_menu
 
@@ -3747,6 +3702,8 @@ class SP303PatternEditor:
         help_menu.add_separator()
         help_menu.add_command(label="Check for Update...", command=self.on_check_for_update)
         help_menu.add_command(label="About", command=self.on_about)
+        help_menu.add_separator()
+        help_menu.add_command(label="View Session Log...", command=self.on_view_log)
 
     def _create_toolbar(self):
         """Create toolbar"""
@@ -3880,13 +3837,23 @@ class SP303PatternEditor:
 
     def _create_status_bar(self):
         """Create status bar"""
+        status_frame = tk.Frame(self.root, bg="#000000")
+        status_frame.pack(side=tk.BOTTOM, fill=tk.X)
+
         self.status_bar = ttk.Label(
-            self.root,
+            status_frame,
             text="Ready",
             relief=tk.SUNKEN,
             anchor=tk.W
         )
-        self.status_bar.pack(side=tk.BOTTOM, fill=tk.X)
+        self.status_bar.pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+        ttk.Label(
+            status_frame,
+            text=self.config.get("device", "BOSS Dr. Sample SP-303"),
+            relief=tk.SUNKEN,
+            anchor=tk.E,
+        ).pack(side=tk.RIGHT)
 
     def set_active_workflow(self, workflow: str):
         self.active_workflow = workflow
@@ -3912,32 +3879,30 @@ class SP303PatternEditor:
         if not smpinfo_file:
             return
         card_dir = Path(smpinfo_file).parent
-        backup_root = Path(__file__).parent / "Backup"
-        backup_root.mkdir(parents=True, exist_ok=True)
-        backup_dir = backup_root / f"card_backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-        backup_dir.mkdir(parents=True, exist_ok=True)
+        snap_path = self.smartmedia_lib.create_snapshot("PHYSICAL_CARD")
         copied = 0
         for sp0_file in sorted(card_dir.glob("*.SP0")):
-            shutil.copy2(sp0_file, backup_dir / sp0_file.name)
+            shutil.copy2(sp0_file, snap_path / sp0_file.name)
             copied += 1
         if copied == 0:
             messagebox.showwarning("Backup Card", "No .SP0 files found to back up.")
+            shutil.rmtree(snap_path)
             return
         self.set_active_workflow("Backup/Restore")
         self.set_loaded_card_context(str(card_dir))
-        self.show_text_dialog("Backup Card", f"Backed up {copied} .SP0 files\nDestination: {backup_dir}", geometry="700x260")
+        self.show_text_dialog("Backup Card", f"Backed up {copied} .SP0 files\nDestination: {snap_path}", geometry="700x260")
 
     def on_restore_backup_quick(self):
-        backup_root = Path(__file__).parent / "Backup"
+        snapshots_root = self.smartmedia_lib.autosaves_dir
         backup_dir = filedialog.askdirectory(
-            title="Select Backup Folder",
-            initialdir=str(backup_root),
+            title="Select Snapshot Folder",
+            initialdir=str(snapshots_root if snapshots_root.exists() else Path.home()),
         )
         if not backup_dir:
             return
         preferred_output = Path("/Volumes/BOSS DATA")
         if not preferred_output.exists():
-            preferred_output = self.get_user_library_paths()["outgoing"]
+            preferred_output = self.get_library_paths()["outgoing"]
         output_dir = self.ask_output_directory(preferred_output)
         if output_dir is None:
             return
@@ -3946,11 +3911,11 @@ class SP303PatternEditor:
             shutil.copy2(sp0_file, output_dir / sp0_file.name)
             restored += 1
         if restored == 0:
-            messagebox.showwarning("Restore Backup", "No .SP0 files found in selected backup folder.")
+            messagebox.showwarning("Restore Snapshot", "No .SP0 files found in selected snapshot folder.")
             return
         self.set_active_workflow("Backup/Restore")
         self.set_loaded_card_context(str(output_dir))
-        messagebox.showinfo("Restore Backup", f"Restored {restored} .SP0 file(s).")
+        messagebox.showinfo("Restore Snapshot", f"Restored {restored} .SP0 file(s).")
 
     def show_home_launcher(self):
         dialog = tk.Toplevel(self.root)
@@ -5131,61 +5096,54 @@ Velocity:
         output_dir = filedialog.askdirectory(**kwargs)
         return Path(output_dir) if output_dir else None
 
-    def get_user_library_paths(self) -> dict:
+    def get_library_paths(self) -> dict:
         return {
-            "root": self.user_library_root,
-            "patterns": self.user_library_root / "Patterns",
-            "templates": self.user_library_root / "Templates",
-            "drums": self.user_library_root / "Drums",
-            "grooves": self.user_library_root / "Grooves",
-            "samples": self.user_library_root / "Samples",
-            "incoming": self.user_library_root / "BOSS DATA_INCOMING",
-            "outgoing": self.user_library_root / "BOSS DATA_OUTGOING",
+            "root": self.smartmedia_library_root,
+            "cards": self.smartmedia_library_root / "Cards",
+            "autosaves": self.smartmedia_library_root / "AutoSaves",
+            "incoming": self.smartmedia_library_root / "BOSS DATA_INCOMING",
+            "outgoing": self.smartmedia_library_root / "BOSS DATA_OUTGOING",
         }
 
-    def ensure_user_library_dirs(self):
-        for path in self.get_user_library_paths().values():
-            path.mkdir(parents=True, exist_ok=True)
+    def ensure_library_dirs(self):
+        self.smartmedia_lib.ensure_dirs()
 
     def default_card_mount_dir(self) -> Path:
         if sys.platform == "darwin":
             preferred = Path("/Volumes/BOSS DATA")
             if preferred.exists():
                 return preferred
-            incoming = self.get_user_library_paths()["incoming"]
+            incoming = self.get_library_paths()["incoming"]
             return incoming if incoming.exists() else Path("/Volumes")
 
-        if sys.platform.startswith("win"):
-            for letter in "DEFGHIJKLMNOPQRSTUVWXYZABC":
-                candidate = Path(f"{letter}:/BOSS DATA")
-                if candidate.exists():
-                    return candidate
-            return Path("C:/")
+        config_path = self.config.get("card_mount_path", "")
+        if config_path:
+            candidate = Path(config_path)
+            if candidate.exists():
+                return candidate
 
-        for base in (Path("/media"), Path("/mnt")):
-            if base.exists():
-                return base
-        return Path.cwd()
+        outgoing = self.get_library_paths()["outgoing"]
+        return outgoing if outgoing.exists() else Path.cwd()
 
     def default_pattern_open_dir(self) -> Path:
         """Default directory for File > Open."""
         preferred = Path("/Volumes/BOSS DATA")
         if preferred.exists():
             return preferred
-        incoming = self.get_user_library_paths()["incoming"]
+        incoming = self.get_library_paths()["incoming"]
         if incoming.exists():
             return incoming
-        return self.user_library_root
+        return self.smartmedia_library_root
 
     def default_pattern_save_dir(self) -> Path:
         """Default directory for File > Save As."""
         preferred = Path("/Volumes/BOSS DATA")
         if preferred.exists():
             return preferred
-        outgoing = self.get_user_library_paths()["outgoing"]
+        outgoing = self.get_library_paths()["outgoing"]
         if outgoing.exists():
             return outgoing
-        return self.user_library_root
+        return self.smartmedia_library_root
 
     def show_prepare_results(
         self,
@@ -5243,9 +5201,6 @@ Velocity:
         x_scroll.pack(fill=tk.X)
         text.configure(xscrollcommand=x_scroll.set)
 
-        button_row = ttk.Frame(frame)
-        button_row.pack(fill=tk.X, pady=(8, 0))
-        ttk.Button(button_row, text="Close", command=dialog.destroy).pack(side=tk.RIGHT)
 
     def archive_existing_outgoing_wavs(self, output_dir: Path) -> Optional[Path]:
         wav_files = sorted(
@@ -5290,7 +5245,7 @@ Velocity:
                 return
             wav_dir_path = Path(wav_dir)
 
-        output_dir = self.get_user_library_paths()["outgoing"]
+        output_dir = self.get_library_paths()["outgoing"]
         output_dir.mkdir(parents=True, exist_ok=True)
 
         try:
@@ -5336,10 +5291,358 @@ Velocity:
         except Exception as exc:
             messagebox.showerror("Quick Import Error", str(exc))
 
-    def on_custom_pad_assignment(self):
+    def on_smartmedia_library(self):
+        """Virtual SmartMedia Library dialog."""
+        self.smartmedia_lib.ensure_dirs()
+        dialog = tk.Toplevel(self.root)
+        dialog.title("SmartMedia Library")
+        dialog.geometry("1200x720")
+        dialog.transient(self.root)
+        dialog.grab_set()
+        dialog.configure(bg="#000000")
+
+        frame = ttk.Frame(dialog, padding=10)
+        frame.pack(fill=tk.BOTH, expand=True)
+
+        # ── Top status bar ──────────────────────────────────────────────────
+        top_bar = ttk.Frame(frame)
+        top_bar.pack(fill=tk.X, pady=(0, 8))
+
+        card_status_var = tk.StringVar(value="Checking physical card...")
+        card_status_lbl = ttk.Label(top_bar, textvariable=card_status_var, font=("Courier", 10))
+        card_status_lbl.pack(side=tk.LEFT)
+
+        write_to_card_var = tk.BooleanVar(value=self.config.get("write_to_card", True))
+        def on_write_toggle():
+            self.config["write_to_card"] = write_to_card_var.get()
+            self.save_config()
+        ttk.Checkbutton(top_bar, text="Write to Card", variable=write_to_card_var,
+                        command=on_write_toggle).pack(side=tk.RIGHT)
+
+        open_card_status_var = tk.StringVar(value="No card open")
+        ttk.Label(top_bar, textvariable=open_card_status_var, font=("Courier", 10)).pack(side=tk.RIGHT, padx=(0, 16))
+
+        def refresh_card_status():
+            preferred = Path("/Volumes/BOSS DATA")
+            if preferred.exists():
+                card_status_var.set(f"● BOSS DATA mounted: {preferred}")
+            else:
+                card_status_var.set("○ No physical card mounted")
+            if dialog.winfo_exists():
+                dialog.after(2000, refresh_card_status)
+        refresh_card_status()
+
+        def open_card():
+            preferred = Path("/Volumes/BOSS DATA") / "SMPINFO0.SP0"
+            if preferred.exists():
+                path = preferred
+            else:
+                chosen = filedialog.askopenfilename(
+                    parent=dialog,
+                    title="Select SMPINFO0.SP0",
+                    initialdir=str(self.default_card_mount_dir()),
+                    filetypes=[("SMPINFO0.SP0", "SMPINFO0.SP0"), ("SP0 Files", "*.SP0"), ("All Files", "*.*")],
+                )
+                if not chosen:
+                    return
+                path = Path(chosen)
+            active_smpinfo[0] = path
+            open_card_status_var.set(f"Open: {path.parent.name}")
+            # Auto-snapshot on open
+            try:
+                self.smartmedia_lib.create_snapshot("PHYSICAL_CARD")
+            except Exception:
+                pass
+            refresh_snap_list()
+
+        def backup_card():
+            card_dir = Path("/Volumes/BOSS DATA")
+            if not card_dir.exists():
+                if active_smpinfo[0] is not None:
+                    card_dir = active_smpinfo[0].parent
+                else:
+                    messagebox.showwarning("Backup Card", "No physical card mounted or open.", parent=dialog)
+                    return
+            try:
+                snap = self.smartmedia_lib.create_snapshot("PHYSICAL_CARD", "backup")
+                copied = 0
+                for sp0_file in sorted(card_dir.glob("*.SP0")):
+                    shutil.copy2(sp0_file, snap / sp0_file.name)
+                    copied += 1
+                refresh_snap_list()
+                messagebox.showinfo("Backup Card", f"Backed up {copied} file(s) to:\n{snap}", parent=dialog)
+            except Exception as exc:
+                messagebox.showerror("Backup Card", str(exc), parent=dialog)
+
+        ttk.Button(top_bar, text="Open Card", command=open_card).pack(side=tk.LEFT, padx=(12, 0))
+        ttk.Button(top_bar, text="Backup Card", command=backup_card).pack(side=tk.LEFT, padx=(6, 0))
+
+        # ── Main two-panel layout ────────────────────────────────────────────
+        paned = ttk.PanedWindow(frame, orient=tk.HORIZONTAL)
+        paned.pack(fill=tk.BOTH, expand=True)
+
+        # ── Left panel: card browser ─────────────────────────────────────────
+        left_frame = ttk.Frame(paned, padding=4)
+        paned.add(left_frame, weight=1)
+
+        ttk.Label(left_frame, text="VIRTUAL CARDS", font=("Courier", 11, "bold")).pack(anchor=tk.W, pady=(0, 4))
+
+        filter_row = ttk.Frame(left_frame)
+        filter_row.pack(fill=tk.X, pady=(0, 4))
+        search_var = tk.StringVar()
+        search_entry = ttk.Entry(filter_row, textvariable=search_var)
+        search_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 4))
+
+        card_tree_cols = ("name", "device", "author")
+        style = ttk.Style(dialog)
+        style.configure("Library.Treeview", background="#000000", fieldbackground="#000000",
+                        foreground="#ffffff", rowheight=22)
+        style.map("Library.Treeview", background=[("selected", "#2a7fff")],
+                  foreground=[("selected", "#ffffff")])
+        card_tree = ttk.Treeview(left_frame, columns=card_tree_cols, show="headings",
+                                 height=20, style="Library.Treeview")
+        card_tree.heading("name", text="Name")
+        card_tree.heading("device", text="Device")
+        card_tree.heading("author", text="Author")
+        card_tree.column("name", width=160)
+        card_tree.column("device", width=70, anchor=tk.CENTER)
+        card_tree.column("author", width=120)
+        card_tree.pack(fill=tk.BOTH, expand=True)
+
+        left_btn_row = ttk.Frame(left_frame)
+        left_btn_row.pack(fill=tk.X, pady=(6, 0))
+
+        # ── Right panel: card detail + history ───────────────────────────────
+        right_frame = ttk.Frame(paned, padding=4)
+        paned.add(right_frame, weight=2)
+
+        detail_title = ttk.Label(right_frame, text="CARD DETAIL", font=("Courier", 11, "bold"))
+        detail_title.pack(anchor=tk.W, pady=(0, 6))
+
+        # Card detail fields
+        detail_frame = ttk.Frame(right_frame)
+        detail_frame.pack(fill=tk.X)
+
+        def make_field(parent, label, row):
+            ttk.Label(parent, text=label, width=12, anchor=tk.E).grid(row=row, column=0, sticky=tk.E, padx=(0, 6), pady=2)
+            var = tk.StringVar()
+            entry = ttk.Entry(parent, textvariable=var)
+            entry.grid(row=row, column=1, sticky=tk.EW, pady=2)
+            parent.columnconfigure(1, weight=1)
+            return var, entry
+
+        name_var, name_entry = make_field(detail_frame, "Name:", 0)
+        device_var, device_entry = make_field(detail_frame, "Device:", 1)
+        author_var, author_entry = make_field(detail_frame, "Author:", 2)
+        categories_var, categories_entry = make_field(detail_frame, "Categories:", 3)
+        tags_var, tags_entry = make_field(detail_frame, "Tags:", 4)
+
+        wp_var = tk.BooleanVar(value=False)
+        wp_btn = ttk.Checkbutton(detail_frame, text="Write Protect", variable=wp_var)
+        wp_btn.grid(row=5, column=1, sticky=tk.W, pady=4)
+
+        detail_btn_row = ttk.Frame(right_frame)
+        detail_btn_row.pack(fill=tk.X, pady=(6, 0))
+
+        # Snapshot history
+        snap_history_label = ttk.Label(right_frame, text="SNAPSHOT HISTORY", font=("Courier", 10, "bold"))
+        snap_history_label.pack(anchor=tk.W, pady=(12, 4))
+
+        snap_cols = ("timestamp", "type")
+        snap_tree = ttk.Treeview(right_frame, columns=snap_cols, show="headings", height=8, style="Library.Treeview")
+        snap_tree.heading("timestamp", text="Snapshot")
+        snap_tree.heading("type", text="Type")
+        snap_tree.column("timestamp", width=180)
+        snap_tree.column("type", width=200)
+        snap_tree.pack(fill=tk.BOTH, expand=True)
+
+        snap_btn_row = ttk.Frame(right_frame)
+        snap_btn_row.pack(fill=tk.X, pady=(6, 0))
+
+        # ── State ─────────────────────────────────────────────────────────────
+        current_card: list = [None]   # list-of-one to allow mutation in closures
+        active_smpinfo: list = [None]  # Path to currently opened SMPINFO0.SP0
+
+        def get_all_cards():
+            query = search_var.get().strip().lower()
+            cards = self.smartmedia_lib.list_cards()
+            if query:
+                cards = [c for c in cards if query in c.name.lower() or query in c.author.lower()
+                         or any(query in cat.lower() for cat in c.categories)]
+            return cards
+
+        def refresh_card_list():
+            for item in card_tree.get_children():
+                card_tree.delete(item)
+            for card in get_all_cards():
+                card_tree.insert("", tk.END, iid=card.name, values=(card.name, card.device, card.author))
+
+        def refresh_snap_list():
+            for item in snap_tree.get_children():
+                snap_tree.delete(item)
+            # Physical card takes priority when open; fall back to selected virtual card
+            if active_smpinfo[0] is not None:
+                snap_source = "PHYSICAL_CARD"
+            elif current_card[0] is not None:
+                snap_source = current_card[0].name
+            else:
+                return
+            snap_history_label.config(text=f"SNAPSHOT HISTORY — {snap_source}")
+            for snap in self.smartmedia_lib.list_snapshots(snap_source):
+                parts = snap.name.split("_", 2)
+                # format: YYYY-MM-DD_HH-MM-SS[_suffix]
+                ts = f"{parts[0]} {parts[1].replace('-', ':')}" if len(parts) >= 2 else snap.name
+                suffix = parts[2] if len(parts) > 2 else ""
+                if not suffix:
+                    snap_type = "Auto"
+                elif suffix.lower() == "backup":
+                    snap_type = "Backup"
+                else:
+                    snap_type = suffix
+                snap_tree.insert("", tk.END, iid=str(snap), values=(ts, snap_type))
+
+        def on_card_select(event=None):
+            sel = card_tree.selection()
+            if not sel:
+                current_card[0] = None
+                return
+            card = self.smartmedia_lib.get_card(sel[0])
+            if card is None:
+                return
+            current_card[0] = card
+            name_var.set(card.name)
+            device_var.set(card.device)
+            author_var.set(card.author)
+            categories_var.set(", ".join(card.categories))
+            tags_var.set(", ".join(card.tags))
+            wp_var.set(card.write_protect)
+            refresh_snap_list()
+
+        card_tree.bind("<<TreeviewSelect>>", on_card_select)
+        search_var.trace_add("write", lambda *_: refresh_card_list())
+
+        def save_current_card():
+            card = current_card[0]
+            if card is None:
+                return
+            card.name = name_var.get().strip()
+            card.device = device_var.get().strip()
+            card.author = author_var.get().strip()
+            card.categories = [c.strip() for c in categories_var.get().split(",") if c.strip()]
+            card.tags = [t.strip() for t in tags_var.get().split(",") if t.strip()]
+            card.write_protect = wp_var.get()
+            self.smartmedia_lib.save_card(card)
+            refresh_card_list()
+
+        def new_card():
+            new_name = simpledialog.askstring("New Virtual Card", "Card name:", parent=dialog)
+            if not new_name or not new_name.strip():
+                return
+            new_name = new_name.strip()
+            if self.smartmedia_lib.get_card(new_name):
+                messagebox.showwarning("New Card", f"A card named '{new_name}' already exists.", parent=dialog)
+                return
+            card = VirtualCard(name=new_name)
+            self.smartmedia_lib.create_card(card)
+            refresh_card_list()
+            card_tree.selection_set(new_name)
+            on_card_select()
+
+        def delete_card():
+            card = current_card[0]
+            if card is None:
+                messagebox.showinfo("Delete Card", "Select a card first.", parent=dialog)
+                return
+            if card.write_protect:
+                messagebox.showwarning("Delete Card", "Card is write-protected.", parent=dialog)
+                return
+            if messagebox.askyesno("Delete Card", f"Delete '{card.name}'? This cannot be undone.", parent=dialog):
+                self.smartmedia_lib.delete_card(card.name)
+                current_card[0] = None
+                refresh_card_list()
+                refresh_snap_list()
+
+        def backup_now():
+            card = current_card[0]
+            if card is None:
+                messagebox.showinfo("Backup Now", "Select a card first.", parent=dialog)
+                return
+            label = simpledialog.askstring("Snapshot Label", "Label (leave blank for 'backup'):", parent=dialog)
+            if label is None:
+                return
+            snap = self.smartmedia_lib.create_snapshot(card.name, label.strip() or "backup")
+            refresh_snap_list()
+            messagebox.showinfo("Backup Now", f"Snapshot created:\n{snap}", parent=dialog)
+
+        def rename_snapshot():
+            sel = snap_tree.selection()
+            if not sel:
+                messagebox.showinfo("Rename", "Select a snapshot first.", parent=dialog)
+                return
+            card = current_card[0]
+            if card is None:
+                return
+            snap_path = Path(sel[0])
+            new_label = simpledialog.askstring("Rename Snapshot", "New label:", parent=dialog)
+            if new_label is None:
+                return
+            self.smartmedia_lib.rename_snapshot(card.name, snap_path, new_label.strip())
+            refresh_snap_list()
+
+        def restore_snapshot():
+            sel = snap_tree.selection()
+            if not sel:
+                messagebox.showinfo("Restore", "Select a snapshot first.", parent=dialog)
+                return
+            card = current_card[0]
+            if card is None:
+                return
+            if card.write_protect:
+                messagebox.showwarning("Restore", "Card is write-protected.", parent=dialog)
+                return
+            snap_path = Path(sel[0])
+            preferred = Path("/Volumes/BOSS DATA")
+            target = preferred if preferred.exists() else self.get_library_paths()["outgoing"]
+            if not messagebox.askyesno("Restore Snapshot",
+                                       f"Restore snapshot to:\n{target}\n\nThis will overwrite files. Continue?",
+                                       parent=dialog):
+                return
+            try:
+                self.smartmedia_lib.restore_snapshot(snap_path, card, target)
+                messagebox.showinfo("Restore", f"Restored to {target}", parent=dialog)
+            except Exception as exc:
+                messagebox.showerror("Restore", str(exc), parent=dialog)
+
+        def open_in_manager():
+            if active_smpinfo[0] is None:
+                messagebox.showinfo(
+                    "SmartMedia Manager",
+                    "Open a card first using the Open Card button.",
+                    parent=dialog,
+                )
+                return
+            self.on_custom_pad_assignment(smpinfo_path=active_smpinfo[0])
+
+        # Wire up buttons
+        ttk.Button(left_btn_row, text="New Card", command=new_card).pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Button(left_btn_row, text="Delete Card", command=delete_card).pack(side=tk.LEFT, padx=(0, 6))
+
+        ttk.Button(detail_btn_row, text="Save Changes", command=save_current_card).pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Button(detail_btn_row, text="Open in SmartMedia Manager", command=open_in_manager).pack(side=tk.LEFT, padx=(0, 6))
+
+        ttk.Button(snap_btn_row, text="Backup Now", command=backup_now).pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Button(snap_btn_row, text="Rename", command=rename_snapshot).pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Button(snap_btn_row, text="Restore", command=restore_snapshot).pack(side=tk.LEFT, padx=(0, 6))
+
+        ttk.Button(frame, text="Close", command=dialog.destroy).pack(side=tk.BOTTOM, anchor=tk.E, pady=(8, 0))
+
+        refresh_card_list()
+
+    def on_custom_pad_assignment(self, smpinfo_path: Optional[Path] = None):
         session = AssignmentSession()
         dialog = tk.Toplevel(self.root)
-        dialog.title("SmartMedia Manager")
+        card_label = smpinfo_path.parent.name if smpinfo_path else "No card loaded"
+        dialog.title(f"SmartMedia Manager — {card_label}" if smpinfo_path else "SmartMedia Manager")
         dialog.geometry("1180x680")
         dialog.transient(self.root)
         dialog.grab_set()
@@ -5352,7 +5655,7 @@ Velocity:
         ttk.Label(frame, text="Helps you manage the samples on your SmartMedia card. You can also reorganise the order by dragging them into new positions.").pack(anchor=tk.W, pady=(0, 4))
         ttk.Label(
             frame,
-            text="Coming Soon: Long/Lo-Fi, Loop, Reverse and DSP Effect editing.",
+            text="Coming Soon: Long/Lo-Fi and DSP Effect editing.",
         ).pack(anchor=tk.W, pady=(0, 4))
         dialog_context = ttk.Label(frame, text="Card Setup: Not loaded | Pending pad changes: 0")
         dialog_context.pack(anchor=tk.W, pady=(0, 8))
@@ -5399,7 +5702,7 @@ Velocity:
 
         ttk.Label(
             frame,
-            text="Tip: Load SMPINFO0.SP0 to view slot metadata. Select a row to assign WAV/SP0 and re-map pads. Click Gate to toggle.",
+            text="Tip: Load SMPINFO0.SP0 to view slot metadata. Select a row to assign WAV/SP0 and re-map pads. Click Gate, Loop or Reverse to toggle.",
         ).pack(anchor=tk.W, pady=(8, 8))
 
         control_panel = tk.Frame(frame, bg="#050505", highlightbackground="#2a2a2a", highlightthickness=1, bd=0)
@@ -5427,6 +5730,11 @@ Velocity:
         rearrange_source_iid: Optional[str] = None
         slot_metadata: Dict[int, Dict[str, str]] = {}
         gate_state: Dict[int, bool] = {}
+        baseline_gate_state: Dict[int, bool] = {}
+        loop_state: Dict[int, bool] = {}
+        baseline_loop_state: Dict[int, bool] = {}
+        reverse_state: Dict[int, bool] = {}
+        baseline_reverse_state: Dict[int, bool] = {}
         loaded_smpinfo_bytes: Optional[bytes] = None
         loaded_smpinfo_path: Optional[Path] = None
         baseline_assignments: Dict[int, str] = {}
@@ -5453,6 +5761,27 @@ Velocity:
                 after = current.get(slot, "-")
                 if before != after:
                     lines.append(f"{slot_to_label(slot)}: {before} -> {after}")
+            for slot in range(SLOT_COUNT):
+                if slot not in baseline_gate_state:
+                    continue
+                before_gate = baseline_gate_state[slot]
+                after_gate = gate_state.get(slot, before_gate)
+                if before_gate != after_gate:
+                    lines.append(f"{slot_to_label(slot)}: Gate -> {'On' if after_gate else 'Off'}")
+            for slot in range(SLOT_COUNT):
+                if slot not in baseline_loop_state:
+                    continue
+                before_loop = baseline_loop_state[slot]
+                after_loop = loop_state.get(slot, before_loop)
+                if before_loop != after_loop:
+                    lines.append(f"{slot_to_label(slot)}: Loop -> {'On' if after_loop else 'Off'}")
+            for slot in range(SLOT_COUNT):
+                if slot not in baseline_reverse_state:
+                    continue
+                before_rev = baseline_reverse_state[slot]
+                after_rev = reverse_state.get(slot, before_rev)
+                if before_rev != after_rev:
+                    lines.append(f"{slot_to_label(slot)}: Reverse -> {'On' if after_rev else 'Off'}")
             return lines
 
         def refresh_dialog_context():
@@ -5576,30 +5905,23 @@ Velocity:
             except Exception as exc:
                 messagebox.showerror("Assign SP0", str(exc), parent=dialog)
 
-        def load_smpinfo_metadata():
-            nonlocal loaded_smpinfo_bytes, loaded_smpinfo_path, gate_state
-            smpinfo_file = filedialog.askopenfilename(
-                parent=dialog,
-                title="Select SMPINFO0.SP0",
-                filetypes=[("SMPINFO0.SP0", "SMPINFO0.SP0")],
-            )
-            if not smpinfo_file:
-                return
-
+        def load_smpinfo_from_path(path: Path):
+            nonlocal loaded_smpinfo_bytes, loaded_smpinfo_path, gate_state, loop_state, reverse_state
             try:
-                smpinfo_path = Path(smpinfo_file)
-                if smpinfo_path.name.upper() != "SMPINFO0.SP0":
+                if path.name.upper() != "SMPINFO0.SP0":
                     raise ValueError("Please select SMPINFO0.SP0")
 
-                loaded_smpinfo_bytes = smpinfo_path.read_bytes()
-                loaded_smpinfo_path = smpinfo_path
-                smpinfo = SMPINFO.from_file(smpinfo_path)
-                source_dir = smpinfo_path.parent
+                loaded_smpinfo_bytes = path.read_bytes()
+                loaded_smpinfo_path = path
+                smpinfo = SMPINFO.from_file(path)
+                source_dir = path.parent
 
                 for slot in range(SLOT_COUNT):
                     session.clear_slot(slot)
                 slot_metadata.clear()
                 gate_state.clear()
+                loop_state.clear()
+                reverse_state.clear()
                 missing_files: List[str] = []
 
                 for slot in range(SLOT_COUNT):
@@ -5610,19 +5932,16 @@ Velocity:
                     samples = slot_record.sample_length_bytes / (2 * channels)
                     seconds = samples / 44100.0
                     duration_text = f"{seconds:.2f}s" if seconds >= 1.0 else f"{seconds * 1000.0:.1f}ms"
-                    loop_text = (
-                        "No loop"
-                        if slot_record.loop_point_bytes == slot_record.sample_length_bytes
-                        else f"{slot_record.loop_point_bytes:,} B"
-                    )
                     gate_state[slot] = slot_record.is_gate
+                    loop_state[slot] = slot_record.is_loop
+                    reverse_state[slot] = slot_record.is_reverse
                     slot_metadata[slot] = {
                         "long_lofi": "-",
                         "stereo": "Stereo" if slot_record.is_stereo else "Mono",
                         "length": f"{slot_record.sample_length_bytes:,} B",
                         "duration": duration_text,
-                        "loop": loop_text,
-                        "reverse": "-",
+                        "loop": "Loop" if slot_record.is_loop else "Off",
+                        "reverse": "Reverse" if slot_record.is_reverse else "Off",
                         "gate": "Gate" if slot_record.is_gate else "Off",
                     }
 
@@ -5638,9 +5957,17 @@ Velocity:
 
                 baseline_assignments.clear()
                 baseline_assignments.update(current_assignment_snapshot())
+                baseline_gate_state.clear()
+                baseline_gate_state.update(gate_state)
+                baseline_loop_state.clear()
+                baseline_loop_state.update(loop_state)
+                baseline_reverse_state.clear()
+                baseline_reverse_state.update(reverse_state)
                 refresh_tree()
                 self.set_loaded_card_context(str(source_dir))
-                self.update_status(f"Loaded card setup: {smpinfo_path}")
+                self.update_status(f"Loaded card setup: {path}")
+                dialog.title(f"SmartMedia Manager — {source_dir.name}")
+                log.info("Card opened: %s (%d slots populated)", path, sum(1 for s in smpinfo.slots if not s.is_empty))
                 if missing_files:
                     messagebox.showwarning(
                         "Load SMPINFO0.SP0",
@@ -5649,6 +5976,17 @@ Velocity:
                     )
             except Exception as exc:
                 messagebox.showerror("Load SMPINFO0.SP0", str(exc), parent=dialog)
+
+        def load_smpinfo_metadata():
+            smpinfo_file = filedialog.askopenfilename(
+                parent=dialog,
+                title="Select SMPINFO0.SP0",
+                initialdir=str(self.default_card_mount_dir()),
+                filetypes=[("SMPINFO0.SP0", "SMPINFO0.SP0"), ("SP0 Files", "*.SP0"), ("All Files", "*.*")],
+            )
+            if not smpinfo_file:
+                return
+            load_smpinfo_from_path(Path(smpinfo_file))
 
         def clear_pad():
             slot = selected_slot()
@@ -5668,7 +6006,7 @@ Velocity:
             nonlocal loaded_smpinfo_bytes
             preferred_output = Path("/Volumes/BOSS DATA")
             if not preferred_output.exists():
-                preferred_output = self.get_user_library_paths()["outgoing"]
+                preferred_output = self.get_library_paths()["outgoing"]
             output_dir = self.ask_output_directory(preferred_output)
             if output_dir is None:
                 return
@@ -5704,141 +6042,144 @@ Velocity:
             confirm_text.insert("1.0", "\n".join(summary_lines))
             confirm_text.configure(state=tk.DISABLED)
             confirm_text.pack(fill=tk.BOTH, expand=True)
-            confirm_result = {"ok": False}
-
             action_row = ttk.Frame(confirm_frame)
             action_row.pack(fill=tk.X, pady=(8, 0))
 
-            def on_confirm():
-                confirm_result["ok"] = True
-                confirm_dialog.destroy()
+            def do_write():
+                for widget in action_row.winfo_children():
+                    widget.destroy()
+                confirm_text.configure(state=tk.NORMAL)
+                confirm_text.delete("1.0", tk.END)
+                confirm_text.insert("1.0", "Writing...")
+                confirm_text.configure(state=tk.DISABLED)
+                confirm_dialog.update()
+                log.info("Write to card started: %s", output_dir)
+                try:
+                    existing_smpinfo = output_dir / "SMPINFO0.SP0"
+                    if existing_smpinfo.exists():
+                        try:
+                            snap = self.smartmedia_lib.create_snapshot("PHYSICAL_CARD")
+                            shutil.copy2(existing_smpinfo, snap / existing_smpinfo.name)
+                        except Exception:
+                            pass
 
-            def on_cancel():
-                confirm_result["ok"] = False
-                confirm_dialog.destroy()
-
-            ttk.Button(action_row, text="Cancel", command=on_cancel).pack(side=tk.RIGHT)
-            ttk.Button(action_row, text="Write Changes", command=on_confirm).pack(side=tk.RIGHT, padx=(0, 6))
-            confirm_dialog.wait_window()
-            if not confirm_result["ok"]:
-                return
-            try:
-                existing_smpinfo = output_dir / "SMPINFO0.SP0"
-                if existing_smpinfo.exists():
-                    backup_root = Path(__file__).parent / "Backup"
-                    backup_root.mkdir(parents=True, exist_ok=True)
-                    smpinfo_backup = backup_root / f"SMPINFO0_backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.SP0"
-                    shutil.copy2(existing_smpinfo, smpinfo_backup)
-
-                results = session.prepare_card(output_dir)
-                smpinfo_out = output_dir / "SMPINFO0.SP0"
-                if loaded_smpinfo_bytes is not None and smpinfo_out.exists():
-                    # Preserving the full extended tail can override pad reassignments.
-                    # Only preserve it when archived SP0 assignments still match native slot filenames.
-                    has_reassignment = False
-                    for slot, source in enumerate(session.prep.sources):
-                        if source.source_type.value != "archived" or source.source_path is None:
-                            continue
-                        expected_name = f"SMP{slot:04X}L.SP0"
-                        if source.source_path.name.upper() != expected_name:
-                            has_reassignment = True
-                            break
-
-                    generated = smpinfo_out.read_bytes()
-                    if len(generated) == len(loaded_smpinfo_bytes) and len(generated) >= 0x400:
-                        merged = bytearray(generated)
-                        if not has_reassignment:
-                            merged[0x400:] = loaded_smpinfo_bytes[0x400:]
-                        else:
-                            results.setdefault("warnings", []).append(
-                                "Skipped SMPINFO tail preservation because pad reassignment was detected."
-                            )
-                        smpinfo_out.write_bytes(merged)
-                # Patch gate into ALL slot-record blocks AFTER the tail merge.
-                # The SP-303 reads from the LAST written block in the write log
-                # (0x0400, 0x0800, …), not from 0x0000, so we must update every block.
-                if gate_state and smpinfo_out.exists():
-                    patched = bytearray(smpinfo_out.read_bytes())
-                    block_size = 0x400
-                    num_blocks = len(patched) // block_size
-                    for slot, is_gate in gate_state.items():
-                        gate_byte = 0x01 if is_gate else 0x00
-                        for blk in range(num_blocks):
-                            blk_start = blk * block_size
-                            # Stop at first unwritten (0xFF-filled) block
-                            if patched[blk_start:blk_start + 4] == b'\xff\xff\xff\xff':
+                    results = session.prepare_card(output_dir)
+                    smpinfo_out = output_dir / "SMPINFO0.SP0"
+                    if loaded_smpinfo_bytes is not None and smpinfo_out.exists():
+                        # Preserving the full extended tail can override pad reassignments.
+                        # Only preserve it when archived SP0 assignments still match native slot filenames.
+                        has_reassignment = False
+                        for slot, source in enumerate(session.prep.sources):
+                            if source.source_type.value != "archived" or source.source_path is None:
+                                continue
+                            expected_name = f"SMP{slot:04X}L.SP0"
+                            if source.source_path.name.upper() != expected_name:
+                                has_reassignment = True
                                 break
-                            byte_off = blk_start + slot * 48 + 37
-                            if byte_off < len(patched):
-                                patched[byte_off] = gate_byte
-                    smpinfo_out.write_bytes(patched)
-                self.show_prepare_results(results, output_dir, "Custom Assignment Complete")
-                self.update_status("Custom pad assignment complete")
-                if baseline_assignments:
+
+                        generated = smpinfo_out.read_bytes()
+                        if len(generated) == len(loaded_smpinfo_bytes) and len(generated) >= 0x400:
+                            merged = bytearray(generated)
+                            if not has_reassignment:
+                                merged[0x400:] = loaded_smpinfo_bytes[0x400:]
+                            else:
+                                results.setdefault("warnings", []).append(
+                                    "Skipped SMPINFO tail preservation because pad reassignment was detected."
+                                )
+                            smpinfo_out.write_bytes(merged)
+                    # Patch gate into ALL slot-record blocks AFTER the tail merge.
+                    # The SP-303 reads from the LAST written block in the write log
+                    # (0x0400, 0x0800, …), not from 0x0000, so we must update every block.
+                    if gate_state and smpinfo_out.exists():
+                        patched = bytearray(smpinfo_out.read_bytes())
+                        block_size = 0x400
+                        num_blocks = len(patched) // block_size
+                        for slot, is_gate in gate_state.items():
+                            gate_byte = 0x01 if is_gate else 0x00
+                            for blk in range(num_blocks):
+                                blk_start = blk * block_size
+                                # Stop at first unwritten (0xFF-filled) block
+                                if patched[blk_start:blk_start + 4] == b'\xff\xff\xff\xff':
+                                    break
+                                byte_off = blk_start + slot * 48 + 37
+                                if byte_off < len(patched):
+                                    patched[byte_off] = gate_byte
+                        smpinfo_out.write_bytes(patched)
+                    # Patch loop flag (byte 0x26, record offset 38) in all written blocks.
+                    if loop_state and smpinfo_out.exists():
+                        patched = bytearray(smpinfo_out.read_bytes())
+                        block_size = 0x400
+                        num_blocks = len(patched) // block_size
+                        for slot, is_loop in loop_state.items():
+                            loop_byte = 0x01 if is_loop else 0x00
+                            for blk in range(num_blocks):
+                                blk_start = blk * block_size
+                                if patched[blk_start:blk_start + 4] == b'\xff\xff\xff\xff':
+                                    break
+                                byte_off = blk_start + slot * 48 + 38
+                                if byte_off < len(patched):
+                                    patched[byte_off] = loop_byte
+                        smpinfo_out.write_bytes(patched)
+                    # Patch reverse flag (byte 0x27, record offset 39) in all written blocks.
+                    if reverse_state and smpinfo_out.exists():
+                        patched = bytearray(smpinfo_out.read_bytes())
+                        block_size = 0x400
+                        num_blocks = len(patched) // block_size
+                        for slot, is_reverse in reverse_state.items():
+                            rev_byte = 0x01 if is_reverse else 0x00
+                            for blk in range(num_blocks):
+                                blk_start = blk * block_size
+                                if patched[blk_start:blk_start + 4] == b'\xff\xff\xff\xff':
+                                    break
+                                byte_off = blk_start + slot * 48 + 39
+                                if byte_off < len(patched):
+                                    patched[byte_off] = rev_byte
+                        smpinfo_out.write_bytes(patched)
+
+                    result_lines = [f"Output directory: {output_dir}"]
+                    if results.get("wav_prepared"):
+                        result_lines.append(f"WAV files prepared: {len(results['wav_prepared'])}")
+                    if results.get("archived_sp0_copied"):
+                        result_lines.append(f".SP0 files copied: {len(results['archived_sp0_copied'])}")
+                    if results.get("smpinfo_created"):
+                        result_lines.append("SMPINFO0.SP0 created.")
+                    if results.get("warnings"):
+                        result_lines.extend(results["warnings"])
+                    confirm_text.configure(state=tk.NORMAL)
+                    confirm_text.delete("1.0", tk.END)
+                    confirm_text.insert("1.0", "\n".join(result_lines))
+                    confirm_text.configure(state=tk.DISABLED)
+                    confirm_dialog.title("Write Complete")
+                    self.update_status("Custom pad assignment complete")
+                    log.info("Write to card complete: %s", output_dir)
+                    # Auto-snapshot written card state
+                    try:
+                        snap_name = "PHYSICAL_CARD" if output_dir == Path("/Volumes/BOSS DATA") else output_dir.name
+                        self.smartmedia_lib.create_snapshot(snap_name)
+                    except Exception:
+                        pass
                     baseline_assignments.clear()
                     baseline_assignments.update(current_assignment_snapshot())
-                refresh_dialog_context()
-            except Exception as exc:
-                messagebox.showerror("Prepare Card", str(exc), parent=dialog)
+                    baseline_gate_state.clear()
+                    baseline_gate_state.update(gate_state)
+                    baseline_loop_state.clear()
+                    baseline_loop_state.update(loop_state)
+                    baseline_reverse_state.clear()
+                    baseline_reverse_state.update(reverse_state)
+                    refresh_dialog_context()
+                except Exception as exc:
+                    log.error("Write to card failed: %s", exc, exc_info=True)
+                    confirm_text.configure(state=tk.NORMAL)
+                    confirm_text.delete("1.0", tk.END)
+                    confirm_text.insert("1.0", f"Error: {exc}")
+                    confirm_text.configure(state=tk.DISABLED)
+                    confirm_dialog.title("Write Failed")
+                ttk.Button(action_row, text="Close", command=confirm_dialog.destroy).pack(side=tk.RIGHT)
 
-        def backup_card():
-            if loaded_smpinfo_path is None:
-                messagebox.showwarning("Backup Card", "Load SMPINFO0.SP0 first.", parent=dialog)
-                return
-
-            card_dir = loaded_smpinfo_path.parent
-            backup_root = Path(__file__).parent / "Backup"
-            backup_root.mkdir(parents=True, exist_ok=True)
-            backup_dir = backup_root / f"card_backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-            backup_dir.mkdir(parents=True, exist_ok=True)
-
-            copied = 0
-            for sp0_file in sorted(card_dir.glob("*.SP0")):
-                shutil.copy2(sp0_file, backup_dir / sp0_file.name)
-                copied += 1
-
-            if copied == 0:
-                messagebox.showwarning("Backup Card", "No .SP0 files found to back up.", parent=dialog)
-                return
-
-            self.show_text_dialog(
-                "Backup Card",
-                f"Backed up {copied} .SP0 file(s)\nDestination: {backup_dir}",
-                geometry="640x280",
-            )
-            self.update_status(f"Backed up card: {backup_dir}")
-
-        def load_backup():
-            backup_root = Path(__file__).parent / "Backup"
-            backup_dir = filedialog.askdirectory(
-                parent=dialog,
-                title="Select Backup Folder",
-                initialdir=str(backup_root),
-            )
-            if not backup_dir:
-                return
-
-            preferred_output = Path("/Volumes/BOSS DATA")
-            if not preferred_output.exists():
-                preferred_output = self.get_user_library_paths()["outgoing"]
-            output_dir = self.ask_output_directory(preferred_output)
-            if output_dir is None:
-                return
-
-            restored = 0
-            for sp0_file in sorted(Path(backup_dir).glob("*.SP0")):
-                shutil.copy2(sp0_file, output_dir / sp0_file.name)
-                restored += 1
-
-            if restored == 0:
-                messagebox.showwarning("Load Backup", "No .SP0 files found in selected backup folder.", parent=dialog)
-            else:
-                messagebox.showinfo("Load Backup", f"Restored {restored} .SP0 file(s).", parent=dialog)
-                self.update_status(f"Loaded backup to {output_dir}")
+            ttk.Button(action_row, text="Cancel", command=confirm_dialog.destroy).pack(side=tk.RIGHT)
+            ttk.Button(action_row, text="Write Changes", command=do_write).pack(side=tk.RIGHT, padx=(0, 6))
 
         ttk.Button(setup_row, text="Load Card Setup", command=load_smpinfo_metadata).pack(side=tk.LEFT, padx=(0, 6))
-        ttk.Button(setup_row, text="Backup Card", command=backup_card).pack(side=tk.LEFT, padx=(0, 6))
-        ttk.Button(setup_row, text="Load Backup", command=load_backup).pack(side=tk.LEFT, padx=(0, 6))
         ttk.Button(route_row, text="Assign WAV", command=assign_wav).pack(side=tk.LEFT, padx=(0, 6))
         ttk.Button(route_row, text="Assign SP0", command=assign_sp0).pack(side=tk.LEFT, padx=(0, 6))
         ttk.Button(route_row, text="Clear Pad", command=clear_pad).pack(side=tk.LEFT, padx=(0, 6))
@@ -5948,6 +6289,18 @@ Velocity:
                 gate_state[slot_a] = gate_b
             if gate_a:
                 gate_state[slot_b] = gate_a
+            loop_a = loop_state.pop(slot_a, False)
+            loop_b = loop_state.pop(slot_b, False)
+            if loop_b:
+                loop_state[slot_a] = loop_b
+            if loop_a:
+                loop_state[slot_b] = loop_a
+            rev_a = reverse_state.pop(slot_a, False)
+            rev_b = reverse_state.pop(slot_b, False)
+            if rev_b:
+                reverse_state[slot_a] = rev_b
+            if rev_a:
+                reverse_state[slot_b] = rev_a
             refresh_tree()
             tree.selection_set(str(slot_b))
             tree.focus(str(slot_b))
@@ -5968,7 +6321,7 @@ Velocity:
 
         # Column indices (1-based, show="headings"):
         # #1=bank_pad #2=source #3=file #4=long_lofi #5=stereo #6=length #7=duration #8=gate #9=loop #10=reverse
-        TOGGLE_COLS = {"#8": "gate"}  # add "#9": "loop", "#10": "reverse" when implemented
+        TOGGLE_COLS = {"#8": "gate", "#9": "loop", "#10": "reverse"}
 
         def handle_cell_toggle(slot: int, col_id: str):
             field = TOGGLE_COLS.get(col_id)
@@ -5982,6 +6335,18 @@ Velocity:
                 slot_metadata[slot]["gate"] = "Gate" if new_val else "Off"
                 refresh_tree()
                 self.update_status(f"{slot_to_label(slot)} Gate: {'On' if new_val else 'Off'}")
+            elif field == "loop":
+                new_val = not loop_state.get(slot, False)
+                loop_state[slot] = new_val
+                slot_metadata[slot]["loop"] = "Loop" if new_val else "Off"
+                refresh_tree()
+                self.update_status(f"{slot_to_label(slot)} Loop: {'On' if new_val else 'Off'}")
+            elif field == "reverse":
+                new_val = not reverse_state.get(slot, False)
+                reverse_state[slot] = new_val
+                slot_metadata[slot]["reverse"] = "Reverse" if new_val else "Off"
+                refresh_tree()
+                self.update_status(f"{slot_to_label(slot)} Reverse: {'On' if new_val else 'Off'}")
 
         def on_tree_release(event):
             nonlocal rearrange_source_iid
@@ -6006,9 +6371,11 @@ Velocity:
         refresh_tree()
         tree.selection_set("0")
         tree.focus("0")
+        if smpinfo_path is not None:
+            dialog.after(50, lambda: load_smpinfo_from_path(smpinfo_path))
 
     def on_add_groove_pattern_card(self):
-        groove_dir = self.get_user_library_paths()["grooves"]
+        groove_dir = self.get_library_paths()["incoming"]
         groove_file = filedialog.askopenfilename(
             title="Select Groove MIDI",
             initialdir=str(groove_dir),
@@ -6088,9 +6455,9 @@ Velocity:
         artist = simpledialog.askstring("Archive Card", "Artist (optional):") or "Unknown"
         description = simpledialog.askstring("Archive Card", "Description (optional):") or ""
 
-        default_patterns = self.get_user_library_paths()["patterns"]
-        destination_root = filedialog.askdirectory(title="Select Song Archive Root", initialdir=str(default_patterns))
-        destination = Path(destination_root) if destination_root else default_patterns
+        default_cards = self.get_library_paths()["cards"]
+        destination_root = filedialog.askdirectory(title="Select Song Archive Root", initialdir=str(default_cards))
+        destination = Path(destination_root) if destination_root else default_cards
 
         try:
             archived = archive_card_as_song(Path(card_dir), song_name, artist, description, destination)
@@ -6102,318 +6469,34 @@ Velocity:
                 f"Samples: {archived['sample_count']}\n"
                 f"Patterns: {'Yes' if archived['has_patterns'] else 'No'}",
             )
-            if messagebox.askyesno("Archive Complete", "Add archived song to library catalog?"):
-                entry = LibraryEntry(
-                    name=song_name,
-                    type=LibraryType.SONG,
-                    path=archived["song_dir"],
-                    description=archived["pack_data"].get("description", ""),
-                    author=archived["pack_data"].get("artist", "Unknown"),
-                    tags=[],
-                    sample_count=archived["sample_count"],
-                    pattern_count=1 if archived["has_patterns"] else 0,
-                    banks_used=["C", "D"] if archived["sample_count"] > 8 else ["C"],
-                )
-                self.library.add_entry(entry)
         except Exception as exc:
             messagebox.showerror("Archive Card", str(exc))
-
-    def on_manage_library(self):
-        dialog = tk.Toplevel(self.root)
-        dialog.title("Pack Library")
-        dialog.geometry("900x540")
-        dialog.transient(self.root)
-        dialog.grab_set()
-        dialog.configure(bg="#000000")
-
-        frame = ttk.Frame(dialog, padding=10)
-        frame.pack(fill=tk.BOTH, expand=True)
-
-        search_row = ttk.Frame(frame)
-        search_row.pack(fill=tk.X, pady=(0, 8))
-        ttk.Label(search_row, text="Search:").pack(side=tk.LEFT, padx=(0, 6))
-        search_var = tk.StringVar()
-        search_entry = ttk.Entry(search_row, textvariable=search_var)
-        search_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 6))
-
-        columns = ("name", "type", "author", "path")
-        tree = ttk.Treeview(frame, columns=columns, show="headings", height=18)
-        tree.heading("name", text="Name")
-        tree.heading("type", text="Type")
-        tree.heading("author", text="Author")
-        tree.heading("path", text="Path")
-        tree.column("name", width=220)
-        tree.column("type", width=120, anchor=tk.CENTER)
-        tree.column("author", width=140)
-        tree.column("path", width=400)
-        tree.pack(fill=tk.BOTH, expand=True)
-
-        button_row = ttk.Frame(frame)
-        button_row.pack(fill=tk.X, pady=(8, 0))
-
-        def refresh(entries: Optional[List[LibraryEntry]] = None):
-            self.library.load()
-            listing = entries if entries is not None else self.library.entries
-            for item in tree.get_children():
-                tree.delete(item)
-            for index, entry in enumerate(listing):
-                tree.insert(
-                    "",
-                    tk.END,
-                    iid=str(index),
-                    values=(entry.name, entry.type.value, entry.author or "-", str(entry.path)),
-                )
-
-        def selected_entry() -> Optional[LibraryEntry]:
-            selected = tree.selection()
-            if not selected:
-                messagebox.showinfo("Pack Library", "Select an entry first.", parent=dialog)
-                return None
-            idx = int(selected[0])
-            values = tree.item(selected[0], "values")
-            if not values:
-                return None
-            name = values[0]
-            for entry in self.library.entries:
-                if entry.name == name:
-                    return entry
-            return None
-
-        def run_search():
-            query = search_var.get().strip()
-            if not query:
-                refresh()
-                return
-            refresh(self.library.search(query))
-
-        def scan_drums():
-            scan_dir = filedialog.askdirectory(
-                parent=dialog,
-                title="Scan Drums Directory",
-                initialdir=str(self.get_user_library_paths()["drums"]),
-            )
-            if not scan_dir:
-                return
-            found = self.library.scan_directory(Path(scan_dir), LibraryType.DRUM_MACHINE)
-            if not found:
-                messagebox.showinfo("Pack Library", "No drum packs found.", parent=dialog)
-                return
-            if messagebox.askyesno("Pack Library", f"Add {len(found)} drums entries?", parent=dialog):
-                self.library.add_entries(found)
-                refresh()
-
-        def scan_grooves():
-            scan_dir = filedialog.askdirectory(
-                parent=dialog,
-                title="Scan Grooves Directory",
-                initialdir=str(self.get_user_library_paths()["grooves"]),
-            )
-            if not scan_dir:
-                return
-            found = self.library.scan_directory(Path(scan_dir), LibraryType.GROOVE_PACK)
-            if not found:
-                messagebox.showinfo("Pack Library", "No groove packs found.", parent=dialog)
-                return
-            if messagebox.askyesno("Pack Library", f"Add {len(found)} grooves entries?", parent=dialog):
-                self.library.add_entries(found)
-                refresh()
-
-        def add_song_or_template():
-            pack_dir = filedialog.askdirectory(
-                parent=dialog,
-                title="Select Project Pack folder (pack.json) or MIDI groove folder",
-                initialdir=str(self.get_user_library_paths()["patterns"]),
-            )
-            if not pack_dir:
-                return
-            selected_path = Path(pack_dir)
-            try:
-                dialog.configure(cursor="watch")
-                dialog.update_idletasks()
-
-                entries_to_add: List[LibraryEntry] = []
-                pattern_entries = 0
-                groove_entries = 0
-
-                if (selected_path / "pack.json").exists():
-                    with open(selected_path / "pack.json", "r", encoding="utf-8") as handle:
-                        pack_data = json.load(handle)
-                    pack_type = LibraryType.TEMPLATE if pack_data.get("type") == "template" else LibraryType.SONG
-                    entries_to_add.append(
-                        LibraryEntry(
-                            name=pack_data.get("title", selected_path.name),
-                            type=pack_type,
-                            path=selected_path,
-                            description=pack_data.get("description", ""),
-                            author=pack_data.get("arranged_by", pack_data.get("author", "")),
-                            tags=pack_data.get("tags", []),
-                        )
-                    )
-                    pattern_entries += 1
-                else:
-                    scan_dirs = [selected_path]
-                    scan_dirs.extend(
-                        sorted(
-                            [
-                                child
-                                for child in selected_path.iterdir()
-                                if child.is_dir()
-                            ],
-                            key=lambda p: str(p).lower(),
-                        )
-                    )
-
-                    for subdir in scan_dirs:
-                        manifest = subdir / "pack.json"
-                        if manifest.exists():
-                            with open(manifest, "r", encoding="utf-8") as handle:
-                                pack_data = json.load(handle)
-                            pack_type = (
-                                LibraryType.TEMPLATE
-                                if pack_data.get("type") == "template"
-                                else LibraryType.SONG
-                            )
-                            entries_to_add.append(
-                                LibraryEntry(
-                                    name=pack_data.get("title", subdir.name),
-                                    type=pack_type,
-                                    path=subdir,
-                                    description=pack_data.get("description", ""),
-                                    author=pack_data.get("arranged_by", pack_data.get("author", "")),
-                                    tags=pack_data.get("tags", []),
-                                )
-                            )
-                            pattern_entries += 1
-                            continue
-
-                        midi_files = sorted(list(subdir.glob("*.mid")) + list(subdir.glob("*.MID")))
-                        if midi_files:
-                            entries_to_add.append(
-                                LibraryEntry(
-                                    name=subdir.name,
-                                    type=LibraryType.GROOVE_PACK,
-                                    path=subdir,
-                                    description=f"{len(midi_files)} MIDI groove file(s)",
-                                    author="",
-                                    tags=[],
-                                    pattern_count=len(midi_files),
-                                )
-                            )
-                            groove_entries += 1
-
-                if not entries_to_add:
-                    raise ValueError(
-                        f"No pack.json or MIDI files found in {selected_path} "
-                        "(checked selected folder and immediate subfolders)."
-                    )
-
-                self.library.add_entries(entries_to_add)
-                messagebox.showinfo(
-                    "Pack Library",
-                    f"Added {len(entries_to_add)} entr{'y' if len(entries_to_add) == 1 else 'ies'} from {selected_path.name}.\n"
-                    f"Project Packs (pack.json): {pattern_entries}\n"
-                    f"Groove folders: {groove_entries}",
-                    parent=dialog,
-                )
-                refresh()
-            except Exception as exc:
-                messagebox.showerror("Pack Library", str(exc), parent=dialog)
-            finally:
-                dialog.configure(cursor="")
-
-        def remove_selected():
-            entry = selected_entry()
-            if entry is None:
-                return
-            if messagebox.askyesno("Pack Library", f"Remove '{entry.name}' from catalog?", parent=dialog):
-                self.library.remove_entry(entry.name)
-                refresh()
-
-        def load_selected():
-            entry = selected_entry()
-            if entry is None:
-                return
-
-            output_dir = self.ask_output_directory()
-            if output_dir is None:
-                return
-
-            try:
-                payload = load_library_entry(entry, output_dir)
-                if entry.type == LibraryType.GROOVE_PACK:
-                    grooves = payload.get("grooves", [])
-                    if not grooves:
-                        messagebox.showwarning("Pack Library", "No grooves found in this pack.", parent=dialog)
-                        return
-                    groove_lines = [f"{i + 1}. {groove.name}" for i, groove in enumerate(grooves)]
-                    groove_choice = simpledialog.askinteger(
-                        "Select Groove",
-                        "Choose groove:\n" + "\n".join(groove_lines),
-                        minvalue=1,
-                        maxvalue=len(grooves),
-                        parent=dialog,
-                    )
-                    if groove_choice is None:
-                        return
-                    pattern_label = simpledialog.askstring(
-                        "Pattern",
-                        "Pattern (C1-D8):",
-                        initialvalue="C1",
-                        parent=dialog,
-                    )
-                    if not pattern_label:
-                        return
-                    pattern_label = pattern_label.strip().upper()
-                    valid_patterns = [f"C{i+1}" for i in range(8)] + [f"D{i+1}" for i in range(8)]
-                    if pattern_label not in valid_patterns:
-                        messagebox.showerror("Invalid Pattern", "Please enter a valid pattern label (C1-D8).", parent=dialog)
-                        return
-                    pattern_slot = valid_patterns.index(pattern_label)
-                    target_pad = simpledialog.askinteger(
-                        "Target Pad",
-                        "Target pad (0-15):",
-                        initialvalue=pattern_slot,
-                        minvalue=0,
-                        maxvalue=15,
-                        parent=dialog,
-                    )
-                    if target_pad is None:
-                        return
-                    apply_groove_to_card(output_dir, grooves[groove_choice - 1], pattern_slot, target_pad)
-                    messagebox.showinfo("Pack Library", "Groove applied successfully.", parent=dialog)
-                else:
-                    self.show_prepare_results(payload.get("results", {}), output_dir, "Library Load Complete")
-                self.update_status(f"Loaded library entry: {entry.name}")
-            except Exception as exc:
-                messagebox.showerror("Pack Library", str(exc), parent=dialog)
-
-        ttk.Button(search_row, text="Search", command=run_search).pack(side=tk.LEFT, padx=(0, 4))
-        ttk.Button(search_row, text="Reset", command=lambda: (search_var.set(""), refresh())).pack(side=tk.LEFT)
-
-        ttk.Button(button_row, text="Load Selected", command=load_selected).pack(side=tk.LEFT, padx=(0, 6))
-        ttk.Button(button_row, text="Scan Drums", command=scan_drums).pack(side=tk.LEFT, padx=(0, 6))
-        ttk.Button(button_row, text="Scan Grooves", command=scan_grooves).pack(side=tk.LEFT, padx=(0, 6))
-        ttk.Button(button_row, text="Add Project Pack or MIDI", command=add_song_or_template).pack(side=tk.LEFT, padx=(0, 6))
-        ttk.Button(button_row, text="Remove Selected", command=remove_selected).pack(side=tk.LEFT, padx=(0, 6))
-        ttk.Button(button_row, text="Refresh", command=refresh).pack(side=tk.LEFT, padx=(0, 6))
-        ttk.Button(button_row, text="Close", command=dialog.destroy).pack(side=tk.RIGHT)
-
-        search_entry.bind("<Return>", lambda _evt: run_search())
-        tree.bind("<Double-1>", lambda _evt: load_selected())
-        refresh()
 
     def on_show_shortcuts(self):
         """Show keyboard shortcuts"""
         dialog = tk.Toplevel(self.root)
         dialog.title("Keyboard Shortcuts")
-        dialog.geometry("520x500")
-        dialog.resizable(False, False)
+        dialog.geometry("520x620")
+        dialog.resizable(True, True)
         dialog.transient(self.root)
         dialog.grab_set()
         dialog.configure(bg="#000000")
 
-        outer = tk.Frame(dialog, bg="#000000", padx=16, pady=12)
-        outer.pack(fill=tk.BOTH, expand=True)
+        canvas = tk.Canvas(dialog, bg="#000000", highlightthickness=0)
+        scrollbar = ttk.Scrollbar(dialog, orient=tk.VERTICAL, command=canvas.yview)
+        canvas.configure(yscrollcommand=scrollbar.set)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        outer = tk.Frame(canvas, bg="#000000", padx=16, pady=12)
+        canvas_window = canvas.create_window((0, 0), window=outer, anchor=tk.NW)
+
+        def on_frame_configure(_event):
+            canvas.configure(scrollregion=canvas.bbox("all"))
+        def on_canvas_configure(event):
+            canvas.itemconfig(canvas_window, width=event.width)
+        outer.bind("<Configure>", on_frame_configure)
+        canvas.bind("<Configure>", on_canvas_configure)
 
         sections = [
             ("FILE", [
@@ -6469,9 +6552,6 @@ Velocity:
                 ).grid(row=row, column=1, sticky="w")
                 row += 1
 
-        ttk.Button(outer, text="Close", command=dialog.destroy).grid(
-            row=row, column=0, columnspan=2, sticky="e", pady=(14, 0)
-        )
 
     def on_help_quick_start(self):
         """Show quick-start guide for beta users."""
@@ -6622,7 +6702,7 @@ A: Most common causes:
             return tuple(parts) if parts else (0,)
 
         def show_result(title: str, msg: str):
-            self.root.after(0, lambda: messagebox.showinfo(title, msg))
+            self.root.after(0, lambda: (messagebox.showinfo(title, msg), self.update_status("Ready")))
 
         def do_check():
             try:
@@ -6664,6 +6744,39 @@ A: Most common causes:
         self.update_status("Checking for updates...")
         threading.Thread(target=do_check, daemon=True).start()
 
+    def on_view_log(self):
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Session Log")
+        dialog.geometry("900x540")
+        dialog.transient(self.root)
+        dialog.configure(bg="#000000")
+
+        frame = ttk.Frame(dialog, padding=10)
+        frame.pack(fill=tk.BOTH, expand=True)
+
+        text = tk.Text(
+            frame, wrap=tk.NONE, bg="#000000", fg="#cccccc",
+            insertbackground="#ffffff", relief=tk.FLAT, highlightthickness=0,
+            font=("Courier", 10),
+        )
+        scroll_y = ttk.Scrollbar(frame, orient=tk.VERTICAL, command=text.yview)
+        scroll_x = ttk.Scrollbar(frame, orient=tk.HORIZONTAL, command=text.xview)
+        text.configure(yscrollcommand=scroll_y.set, xscrollcommand=scroll_x.set)
+        scroll_y.pack(side=tk.RIGHT, fill=tk.Y)
+        scroll_x.pack(side=tk.BOTTOM, fill=tk.X)
+        text.pack(fill=tk.BOTH, expand=True)
+
+        try:
+            content = _LOG_PATH.read_text(encoding="utf-8") if _LOG_PATH.exists() else "(no log file yet)"
+        except Exception as exc:
+            content = f"(could not read log: {exc})"
+
+        text.insert("1.0", content)
+        text.configure(state=tk.DISABLED)
+        text.see(tk.END)
+
+        ttk.Label(frame, text=str(_LOG_PATH), font=("Courier", 9)).pack(anchor=tk.W, pady=(6, 0))
+
     def on_about(self):
         """Show about dialog"""
         about = tk.Toplevel(self.root)
@@ -6697,16 +6810,6 @@ A: Most common causes:
             anchor="w",
         ).pack(anchor=tk.W, pady=(8, 10))
 
-        tk.Label(
-            container,
-            text="Disclaimer: Dr. Sidekick is an independent community project and is not affiliated with, endorsed by, or supported by Roland Corporation or BOSS.",
-            wraplength=580,
-            justify=tk.LEFT,
-            bg="#000000",
-            fg="#cccccc",
-            anchor="w",
-        ).pack(anchor=tk.W, pady=(0, 14))
-
         contacts = (
             "Author: One Coin One Play\n\n"
             "github.com/OneCoinOnePlay\n"
@@ -6723,32 +6826,76 @@ A: Most common causes:
             bg="#000000",
             fg="#ffffff",
             anchor="w",
+        ).pack(anchor=tk.W, pady=(0, 14))
+
+        tk.Label(
+            container,
+            text="Disclaimer: Dr. Sidekick is an independent community project and is not affiliated with, endorsed by, or supported by Roland Corporation or BOSS.",
+            wraplength=580,
+            justify=tk.LEFT,
+            bg="#000000",
+            fg="#cccccc",
+            anchor="w",
         ).pack(anchor=tk.W)
 
-    def load_recent_files(self):
-        """Load recent files from config file"""
-        config_path = Path.home() / ".dr_sidekick_recent"
+    def load_config(self):
+        """Load app config from JSON file, migrating old recent files if present."""
+        self.config: dict = {
+            "device": "BOSS Dr. Sample SP-303",
+            "card_mount_path": "",
+            "write_to_card": True,
+            "recent_files": [],
+        }
+        config_path = Path(__file__).parent / "dr_sidekick_config.json"
         if config_path.exists():
             try:
-                with open(config_path, 'r') as f:
-                    for line in f:
-                        line = line.strip()
-                        if line:
-                            path = Path(line)
-                            if path.exists():
-                                self.recent_files.append(path)
+                with open(config_path, "r", encoding="utf-8") as f:
+                    saved = json.load(f)
+                self.config.update(saved)
             except Exception:
-                pass  # Ignore errors loading config
+                pass
+        # Migrate old recent files file
+        old_path = Path.home() / ".dr_sidekick_recent"
+        if old_path.exists() and not self.config.get("recent_files"):
+            try:
+                lines = old_path.read_text(encoding="utf-8").splitlines()
+                self.config["recent_files"] = [l.strip() for l in lines if l.strip()]
+                self.save_config()
+                old_path.unlink(missing_ok=True)
+            except Exception:
+                pass
+
+    def save_config(self):
+        """Save app config to JSON file."""
+        config_path = Path(__file__).parent / "dr_sidekick_config.json"
+        try:
+            with open(config_path, "w", encoding="utf-8") as f:
+                json.dump(self.config, f, indent=2)
+        except Exception:
+            pass
+
+    def get_card_mount_path(self) -> Path:
+        """Return configured card mount path or auto-detect."""
+        if sys.platform == "darwin":
+            preferred = Path("/Volumes/BOSS DATA")
+            if preferred.exists():
+                return preferred
+        config_val = self.config.get("card_mount_path", "")
+        if config_val:
+            return Path(config_val)
+        return self.get_library_paths()["outgoing"]
+
+    def load_recent_files(self):
+        """Load recent files from config."""
+        for line in self.config.get("recent_files", []):
+            path = Path(line)
+            if path.exists():
+                self.recent_files.append(path)
 
     def save_recent_files(self):
-        """Save recent files to config file"""
-        config_path = Path.home() / ".dr_sidekick_recent"
-        try:
-            with open(config_path, 'w') as f:
-                for path in self.recent_files:
-                    f.write(f"{path}\n")
-        except Exception:
-            pass  # Ignore errors saving config
+        """Save recent files to config."""
+        self.config["recent_files"] = [str(p) for p in self.recent_files]
+        self.save_config()
 
     def add_recent_file(self, ptninfo_path: Path):
         """Add file to recent files list"""
@@ -6845,10 +6992,27 @@ A: Most common causes:
 
 def main():
     """Main entry point"""
+    # Catch unhandled exceptions
+    def _excepthook(exc_type, exc_value, exc_tb):
+        log.error("Unhandled exception:\n%s", "".join(traceback.format_exception(exc_type, exc_value, exc_tb)).rstrip())
+        sys.__excepthook__(exc_type, exc_value, exc_tb)
+    sys.excepthook = _excepthook
+
+    # Patch messagebox.showerror so all error dialogs are logged automatically
+    _orig_showerror = messagebox.showerror
+    def _showerror(title="Error", message="", **kwargs):
+        log.error("[dialog] %s: %s", title, message)
+        return _orig_showerror(title, message, **kwargs)
+    messagebox.showerror = _showerror
+
+    log.info("=" * 60)
+    log.info("Dr. Sidekick %s started", APP_VERSION)
+
     debug_mode = "--debug" in sys.argv[1:]
     root = TkinterDnD.Tk() if TKDND_AVAILABLE else tk.Tk()
     app = SP303PatternEditor(root, debug_mode=debug_mode)
     root.mainloop()
+    log.info("Dr. Sidekick session ended")
 
 
 if __name__ == '__main__':
