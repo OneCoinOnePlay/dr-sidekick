@@ -1601,6 +1601,9 @@ class SP303CardPrep:
         return prep
 
 
+SP303_PADS = [f"C{i}" for i in range(1, 9)] + [f"D{i}" for i in range(1, 9)]
+
+
 @dataclass
 class VirtualCard:
     name: str
@@ -1608,6 +1611,7 @@ class VirtualCard:
     author: str = ""
     categories: List[str] = field(default_factory=list)
     tags: List[str] = field(default_factory=list)
+    pad_notes: Dict[str, str] = field(default_factory=dict)
     write_protect: bool = False
     created: str = ""
     modified: str = ""
@@ -1617,6 +1621,7 @@ class VirtualCard:
         return {
             "name": self.name, "device": self.device, "author": self.author,
             "categories": self.categories, "tags": self.tags,
+            "pad_notes": self.pad_notes,
             "write_protect": self.write_protect,
             "created": self.created, "modified": self.modified,
         }
@@ -1626,7 +1631,8 @@ class VirtualCard:
         return cls(
             name=d.get("name", path.name), device=d.get("device", "SP-303"),
             author=d.get("author", ""), categories=d.get("categories", []),
-            tags=d.get("tags", []), write_protect=d.get("write_protect", False),
+            tags=d.get("tags", []), pad_notes=d.get("pad_notes", {}),
+            write_protect=d.get("write_protect", False),
             created=d.get("created", ""), modified=d.get("modified", ""),
             path=path,
         )
@@ -1636,12 +1642,12 @@ class SmartMediaLibrary:
     def __init__(self, root: Path):
         self.root = root
         self.cards_dir = root / "Cards"
-        self.autosaves_dir = root / "AutoSaves"
-        self.incoming_dir = root / "BOSS DATA_INCOMING"
-        self.outgoing_dir = root / "BOSS DATA_OUTGOING"
+        self.backup_dir = root.parent / "Backup"
+        self.incoming_dir = self.cards_dir / "BOSS DATA_INCOMING"
+        self.outgoing_dir = self.cards_dir / "BOSS DATA_OUTGOING"
 
     def ensure_dirs(self):
-        for d in (self.cards_dir, self.autosaves_dir, self.incoming_dir, self.outgoing_dir):
+        for d in (self.cards_dir, self.backup_dir, self.incoming_dir, self.outgoing_dir):
             d.mkdir(parents=True, exist_ok=True)
 
     def list_cards(self) -> List["VirtualCard"]:
@@ -1693,38 +1699,44 @@ class SmartMediaLibrary:
         if card_dir.exists():
             shutil.rmtree(card_dir)
 
-    def list_snapshots(self, card_name: str) -> List[Path]:
-        snap_dir = self.autosaves_dir / card_name
-        if not snap_dir.exists():
-            return []
-        snaps = sorted([d for d in snap_dir.iterdir() if d.is_dir()], reverse=True)
-        return snaps
-
-    def create_snapshot(self, card_name: str, label: str = "") -> Path:
-        ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-        folder_name = f"{ts}_{label}" if label else ts
-        snap_dir = self.autosaves_dir / card_name / folder_name
-        snap_dir.mkdir(parents=True, exist_ok=True)
+    def backup_card_files(self, card_name: str) -> Path:
+        """Copy SP0 files from card dir into Backup/{card_name}/."""
         card_dir = self.cards_dir / card_name
-        if card_dir.exists():
-            for f in card_dir.iterdir():
-                if f.is_file():
-                    shutil.copy2(f, snap_dir / f.name)
-        log.info("Snapshot created: %s", snap_dir)
-        return snap_dir
+        dest = self.backup_dir / card_name
+        dest.mkdir(parents=True, exist_ok=True)
+        for f in sorted(card_dir.glob("*.SP0")):
+            shutil.copy(f, dest / f.name)
+        log.info("Card backup created: %s", dest)
+        return dest
 
-    def rename_snapshot(self, card_name: str, snapshot_path: Path, new_label: str):
-        ts = snapshot_path.name.split("_")[0] if "_" in snapshot_path.name else snapshot_path.name
-        new_name = f"{ts}_{new_label}" if new_label else ts
-        new_path = snapshot_path.parent / new_name
-        snapshot_path.rename(new_path)
-        return new_path
+    def import_sp0_files(self, card_name: str, source_dir: Path, auto_backup: bool = False):
+        """Copy SP0 files from source_dir directly into the card dir."""
+        card_dir = self.cards_dir / card_name
+        card_dir.mkdir(parents=True, exist_ok=True)
+        if auto_backup and any(card_dir.glob("*.SP0")):
+            self.backup_card_files(card_name)
+        for f in sorted(source_dir.glob("*.SP0")):
+            shutil.copy(f, card_dir / f.name)
+        log.info("Imported SP0 files from %s to %s", source_dir, card_dir)
 
-    def restore_snapshot(self, snapshot_path: Path, card: "VirtualCard", target_dir: Path):
+    def card_has_patterns(self, card_name: str) -> bool:
+        """Return True if PTNINFO0.SP0 in the card dir has any active pattern slots."""
+        ptninfo = self.cards_dir / card_name / "PTNINFO0.SP0"
+        if not ptninfo.exists():
+            return False
+        try:
+            data = ptninfo.read_bytes()
+            return any(data[i] == 0x04 for i in range(0, min(len(data), 64), 4))
+        except Exception:
+            return False
+
+    def restore_card(self, card_name: str, target_dir: Path):
+        """Copy SP0 files from card dir to target_dir (e.g. physical card)."""
+        card_dir = self.cards_dir / card_name
         target_dir.mkdir(parents=True, exist_ok=True)
-        for f in snapshot_path.iterdir():
-            if f.is_file():
-                shutil.copy2(f, target_dir / f.name)
+        for f in sorted(card_dir.glob("*.SP0")):
+            shutil.copy(f, target_dir / f.name)
+        log.info("Restored %s to %s", card_name, target_dir)
 
 
 class AssignmentSession:
@@ -1922,7 +1934,7 @@ def archive_card_as_song(
     if not smpinfo_path.exists():
         raise ValueError(f"No SMPINFO0.SP0 found in {card_dir}")
 
-    destination_root = destination_root or (Path(__file__).parent / "User-Library" / "Patterns")
+    destination_root = destination_root or (Path(__file__).parent / "SmartMedia-Library" / "Cards")
     safe_name = song_name.replace(" ", "-").replace("/", "-")
     song_dir = destination_root / safe_name
     song_dir.mkdir(parents=True, exist_ok=True)
@@ -3484,6 +3496,7 @@ class SP303PatternEditor:
         self.root = root
         self.debug_mode = debug_mode
         self.root.title("Dr. Sidekick by One Coin One Play")
+        self.root.withdraw()  # Hidden until user opens Pattern Manager
 
         # Calculate window height: toolbar (~40) + ruler (25) + 32 lanes + statusbar (~25) + padding
         window_height = 40 + 25 + (32 * 25) + 25 + 30  # ~920 pixels
@@ -3603,8 +3616,8 @@ class SP303PatternEditor:
         self.root.bind("<Control-Shift-C>", lambda e: self.on_copy_slot())
         self.root.bind("<Control-Shift-V>", lambda e: self.on_paste_slot())
         self.root.bind("<Control-q>", lambda e: self.on_exit())
-        self.root.bind("<Control-Shift-L>", lambda e: self.show_home_launcher())
-        self.root.bind("<Control-Shift-l>", lambda e: self.show_home_launcher())
+        self.root.bind("<Control-Shift-L>", lambda e: self.on_smartmedia_library())
+        self.root.bind("<Control-Shift-l>", lambda e: self.on_smartmedia_library())
         self.root.bind("<d>", self.on_delete_key_root)
         self.root.bind("<D>", self.on_delete_key_root)
         self.root.bind("<Delete>", self.on_delete_key_root)
@@ -3625,7 +3638,7 @@ class SP303PatternEditor:
         # Start with new pattern
         self.on_new()
         self.refresh_slot_labels()
-        self.root.after(150, self.show_home_launcher)
+        self.root.after(150, self.on_smartmedia_library)
 
     def _create_menu(self):
         """Create menu bar"""
@@ -3644,8 +3657,8 @@ class SP303PatternEditor:
 
         self.file_menu.add_separator()
         self.file_menu.add_command(
-            label="Home Launcher...",
-            command=self.show_home_launcher,
+            label="SmartMedia Library...",
+            command=self.on_smartmedia_library,
             accelerator="Ctrl+Shift+L",
         )
         self.file_menu.add_separator()
@@ -3713,7 +3726,7 @@ class SP303PatternEditor:
         card_menu = tk.Menu(menubar, tearoff=0)
         menubar.add_cascade(label="Samples", menu=card_menu)
         card_menu.add_command(label="Quick Import WAV Folder...", command=self.on_quick_import_card)
-        card_menu.add_command(label="SmartMedia Manager...", command=self.on_custom_pad_assignment)
+        card_menu.add_command(label="Sample Manager...", command=self.on_sample_manager)
         card_menu.add_command(label="SmartMedia Library...", command=self.on_smartmedia_library)
         card_menu.add_separator()
         card_menu.add_command(label="Convert MPC1000 Program (.pgm)...", command=self.on_import_mpc1000)
@@ -3908,26 +3921,25 @@ class SP303PatternEditor:
         if not smpinfo_file:
             return
         card_dir = Path(smpinfo_file).parent
-        snap_path = self.smartmedia_lib.create_snapshot("PHYSICAL_CARD")
-        copied = 0
-        for sp0_file in sorted(card_dir.glob("*.SP0")):
-            shutil.copy2(sp0_file, snap_path / sp0_file.name)
-            copied += 1
-        if copied == 0:
+        sp0_files = sorted(card_dir.glob("*.SP0"))
+        if not sp0_files:
             messagebox.showwarning("Backup Card", "No .SP0 files found to back up.")
-            shutil.rmtree(snap_path)
             return
+        dest = self.smartmedia_lib.backup_dir / card_dir.name
+        dest.mkdir(parents=True, exist_ok=True)
+        for f in sp0_files:
+            shutil.copy(f, dest / f.name)
         self.set_active_workflow("Backup/Restore")
         self.set_loaded_card_context(str(card_dir))
-        self.show_text_dialog("Backup Card", f"Backed up {copied} .SP0 files\nDestination: {snap_path}", geometry="700x260")
+        self.show_text_dialog("Backup Card", f"Backed up {len(sp0_files)} .SP0 files\nDestination: {dest}", geometry="700x260")
 
     def on_restore_backup_quick(self):
-        snapshots_root = self.smartmedia_lib.autosaves_dir
-        backup_dir = filedialog.askdirectory(
-            title="Select Snapshot Folder",
-            initialdir=str(snapshots_root if snapshots_root.exists() else Path.home()),
+        cards_root = self.smartmedia_lib.cards_dir
+        source_dir = filedialog.askdirectory(
+            title="Select Virtual Card Folder to Restore From",
+            initialdir=str(cards_root if cards_root.exists() else Path.home()),
         )
-        if not backup_dir:
+        if not source_dir:
             return
         preferred_output = Path("/Volumes/BOSS DATA")
         if not preferred_output.exists():
@@ -3935,72 +3947,16 @@ class SP303PatternEditor:
         output_dir = self.ask_output_directory(preferred_output)
         if output_dir is None:
             return
-        restored = 0
-        for sp0_file in sorted(Path(backup_dir).glob("*.SP0")):
-            shutil.copy2(sp0_file, output_dir / sp0_file.name)
-            restored += 1
-        if restored == 0:
-            messagebox.showwarning("Restore Snapshot", "No .SP0 files found in selected snapshot folder.")
+        sp0_files = sorted(Path(source_dir).glob("*.SP0"))
+        if not sp0_files:
+            messagebox.showwarning("Restore", "No .SP0 files found in selected folder.")
             return
+        for sp0_file in sp0_files:
+            shutil.copy(sp0_file, output_dir / sp0_file.name)
         self.set_active_workflow("Backup/Restore")
         self.set_loaded_card_context(str(output_dir))
-        messagebox.showinfo("Restore Snapshot", f"Restored {restored} .SP0 file(s).")
+        messagebox.showinfo("Restore", f"Restored {len(sp0_files)} .SP0 file(s).")
 
-    def show_home_launcher(self):
-        dialog = tk.Toplevel(self.root)
-        dialog.title("Dr. Sidekick Home")
-        dialog.geometry("560x340")
-        dialog.transient(self.root)
-        dialog.grab_set()
-        dialog.configure(bg="#000000")
-
-        frame = ttk.Frame(dialog, padding=14)
-        frame.pack(fill=tk.BOTH, expand=True)
-
-        ttk.Label(frame, text="Dr. Sidekick", font=("Courier", 18, "bold")).pack(anchor=tk.W)
-        ttk.Label(
-            frame,
-            text="Pattern editor and SmartMedia librarian for the Boss Dr. Sample SP-303.",
-        ).pack(anchor=tk.W, pady=(4, 12))
-
-        def create_task_button(title: str, desc: str, action, workflow: str):
-            btn_frame = tk.Frame(frame, bg="#090909", highlightbackground="#2f2f2f", highlightthickness=1, bd=0)
-            btn_frame.pack(fill=tk.X, pady=4)
-
-            def run_action():
-                self.set_active_workflow(workflow)
-                dialog.destroy()
-                action()
-
-            ttk.Button(btn_frame, text=title, command=run_action).pack(fill=tk.X, padx=8, pady=(8, 4))
-            tk.Label(
-                btn_frame,
-                text=desc,
-                justify=tk.LEFT,
-                anchor="w",
-                bg="#090909",
-                fg="#d0d0d0",
-                wraplength=500,
-            ).pack(fill=tk.X, padx=8, pady=(0, 8))
-
-        create_task_button(
-            "Pattern Editor",
-            "Create new patterns or edit existing patterns. Import MIDI and apply grooves.",
-            lambda: None,
-            "Patterns",
-        )
-        create_task_button(
-            "SmartMedia Manager",
-            "Helps you manage your SmartMedia card.",
-            self.on_custom_pad_assignment,
-            "Samples/Card",
-        )
-        create_task_button(
-            "Quick Import",
-            "Get a whole bank of audio files onto your SmartMedia card fast.",
-            self.on_quick_import_card,
-            "Samples/Card",
-        )
 
 
     def update_status(self, message: str):
@@ -5129,13 +5085,15 @@ Velocity:
         return {
             "root": self.smartmedia_library_root,
             "cards": self.smartmedia_library_root / "Cards",
-            "autosaves": self.smartmedia_library_root / "AutoSaves",
-            "incoming": self.smartmedia_library_root / "BOSS DATA_INCOMING",
-            "outgoing": self.smartmedia_library_root / "BOSS DATA_OUTGOING",
+            "incoming": self.smartmedia_library_root / "Cards" / "BOSS DATA_INCOMING",
+            "outgoing": self.smartmedia_library_root / "Cards" / "BOSS DATA_OUTGOING",
         }
 
     def ensure_library_dirs(self):
         self.smartmedia_lib.ensure_dirs()
+        for name in ("BOSS DATA_INCOMING", "BOSS DATA_OUTGOING"):
+            if self.smartmedia_lib.get_card(name) is None:
+                self.smartmedia_lib.create_card(VirtualCard(name=name, author="Dr. Sample"))
 
     def default_card_mount_dir(self) -> Path:
         if sys.platform == "darwin":
@@ -5285,7 +5243,7 @@ Velocity:
             ]
             if archive_dir is not None:
                 summary_lines.append(
-                    f"Archived existing WAV files in BOSS DATA_OUTGOING to /BOSS DATA_OUTGOING/{archive_dir.name}"
+                    f"Archived existing WAV files in BOSS DATA_OUTGOING to Cards/BOSS DATA_OUTGOING/{archive_dir.name}"
                 )
             if payload.get("batch_count", 1) > 1:
                 summary_lines.append(
@@ -5433,6 +5391,21 @@ Velocity:
         frame = ttk.Frame(dialog, padding=10)
         frame.pack(fill=tk.BOTH, expand=True)
 
+        # ── Branding header ─────────────────────────────────────────────────
+        header_frame = ttk.Frame(frame)
+        header_frame.pack(fill=tk.X, pady=(0, 6))
+        ttk.Label(header_frame, text="Dr. Sidekick", font=("Courier", 18, "bold")).pack(side=tk.LEFT)
+        ttk.Label(header_frame, text="Pattern editor and SmartMedia librarian for the Boss Dr. Sample SP-303.",
+                  font=("Courier", 9)).pack(side=tk.LEFT, padx=(12, 0), anchor=tk.S, pady=(0, 3))
+        def open_pattern_manager():
+            self.root.deiconify()
+            self.root.lift()
+            dialog.destroy()
+
+        dialog.protocol("WM_DELETE_WINDOW", open_pattern_manager)
+        ttk.Button(header_frame, text="Open Pattern Manager",
+                   command=open_pattern_manager).pack(side=tk.RIGHT)
+
         # ── Top status bar ──────────────────────────────────────────────────
         top_bar = ttk.Frame(frame)
         top_bar.pack(fill=tk.X, pady=(0, 8))
@@ -5461,6 +5434,11 @@ Velocity:
                 dialog.after(2000, refresh_card_status)
         refresh_card_status()
 
+        auto_backup_var = tk.BooleanVar(value=self.config.get("auto_backup_on_open", False))
+        def on_auto_backup_toggle():
+            self.config["auto_backup_on_open"] = auto_backup_var.get()
+            self.save_config()
+
         def open_card():
             preferred = Path("/Volumes/BOSS DATA") / "SMPINFO0.SP0"
             if preferred.exists():
@@ -5477,12 +5455,15 @@ Velocity:
                 path = Path(chosen)
             active_smpinfo[0] = path
             open_card_status_var.set(f"Open: {path.parent.name}")
-            # Auto-snapshot on open
-            try:
-                self.smartmedia_lib.create_snapshot("PHYSICAL_CARD")
-            except Exception:
-                pass
-            refresh_snap_list()
+            if auto_backup_var.get():
+                try:
+                    source = path.parent
+                    dest = self.smartmedia_lib.backup_dir / source.name
+                    dest.mkdir(parents=True, exist_ok=True)
+                    for f in sorted(source.glob("*.SP0")):
+                        shutil.copy(f, dest / f.name)
+                except Exception:
+                    pass
 
         def backup_card():
             card_dir = Path("/Volumes/BOSS DATA")
@@ -5492,19 +5473,24 @@ Velocity:
                 else:
                     messagebox.showwarning("Backup Card", "No physical card mounted or open.", parent=dialog)
                     return
+            sp0_files = sorted(card_dir.glob("*.SP0"))
+            if not sp0_files:
+                messagebox.showwarning("Backup Card", "No .SP0 files found on card.", parent=dialog)
+                return
             try:
-                snap = self.smartmedia_lib.create_snapshot("PHYSICAL_CARD", "backup")
-                copied = 0
-                for sp0_file in sorted(card_dir.glob("*.SP0")):
-                    shutil.copy2(sp0_file, snap / sp0_file.name)
-                    copied += 1
-                refresh_snap_list()
-                messagebox.showinfo("Backup Card", f"Backed up {copied} file(s) to:\n{snap}", parent=dialog)
+                dest = self.smartmedia_lib.backup_dir / card_dir.name
+                dest.mkdir(parents=True, exist_ok=True)
+                for f in sp0_files:
+                    shutil.copy(f, dest / f.name)
+                messagebox.showinfo("Backup Card", f"Backed up {len(sp0_files)} file(s) to Backup/{card_dir.name}/", parent=dialog)
             except Exception as exc:
                 messagebox.showerror("Backup Card", str(exc), parent=dialog)
 
         ttk.Button(top_bar, text="Open Card", command=open_card).pack(side=tk.LEFT, padx=(12, 0))
+        ttk.Button(top_bar, text="Create Virtual Card", command=lambda: create_virtual_card_from_physical()).pack(side=tk.LEFT, padx=(6, 0))
         ttk.Button(top_bar, text="Backup Card", command=backup_card).pack(side=tk.LEFT, padx=(6, 0))
+        ttk.Checkbutton(top_bar, text="Auto-backup on Open", variable=auto_backup_var,
+                        command=on_auto_backup_toggle).pack(side=tk.LEFT, padx=(12, 0))
 
         # ── Main two-panel layout ────────────────────────────────────────────
         paned = ttk.PanedWindow(frame, orient=tk.HORIZONTAL)
@@ -5522,7 +5508,7 @@ Velocity:
         search_entry = ttk.Entry(filter_row, textvariable=search_var)
         search_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 4))
 
-        card_tree_cols = ("name", "device", "author")
+        card_tree_cols = ("name", "author", "ptn")
         style = ttk.Style(dialog)
         style.configure("Library.Treeview", background="#000000", fieldbackground="#000000",
                         foreground="#ffffff", rowheight=22)
@@ -5531,11 +5517,12 @@ Velocity:
         card_tree = ttk.Treeview(left_frame, columns=card_tree_cols, show="headings",
                                  height=20, style="Library.Treeview")
         card_tree.heading("name", text="Name")
-        card_tree.heading("device", text="Device")
         card_tree.heading("author", text="Author")
+        card_tree.heading("ptn", text="PTN")
         card_tree.column("name", width=160)
-        card_tree.column("device", width=70, anchor=tk.CENTER)
         card_tree.column("author", width=120)
+        card_tree.column("ptn", width=40, anchor=tk.CENTER)
+        card_tree.tag_configure("active", background="#2a7fff", foreground="#ffffff")
         card_tree.pack(fill=tk.BOTH, expand=True)
 
         left_btn_row = ttk.Frame(left_frame)
@@ -5561,32 +5548,35 @@ Velocity:
             return var, entry
 
         name_var, name_entry = make_field(detail_frame, "Name:", 0)
-        device_var, device_entry = make_field(detail_frame, "Device:", 1)
-        author_var, author_entry = make_field(detail_frame, "Author:", 2)
-        categories_var, categories_entry = make_field(detail_frame, "Categories:", 3)
-        tags_var, tags_entry = make_field(detail_frame, "Tags:", 4)
+        author_var, author_entry = make_field(detail_frame, "Author:", 1)
+        categories_var, categories_entry = make_field(detail_frame, "Categories:", 2)
+        tags_var, tags_entry = make_field(detail_frame, "Tags:", 3)
 
         wp_var = tk.BooleanVar(value=False)
         wp_btn = ttk.Checkbutton(detail_frame, text="Write Protect", variable=wp_var)
-        wp_btn.grid(row=5, column=1, sticky=tk.W, pady=4)
+        wp_btn.grid(row=4, column=1, sticky=tk.W, pady=4)
+
+        # Pre-fill author from last used
+        author_var.set(self.config.get("last_author", ""))
+
+        # Pad notes
+        pad_notes_frame = ttk.LabelFrame(right_frame, text="PAD NOTES", padding=4)
+        pad_notes_frame.pack(fill=tk.X, pady=(8, 0))
+
+        pad_note_vars: Dict[str, tk.StringVar] = {}
+        for i, pad in enumerate(SP303_PADS):
+            col = i % 8
+            base_row = (i // 8) * 2
+            ttk.Label(pad_notes_frame, text=pad, anchor=tk.CENTER, width=6).grid(
+                row=base_row, column=col, padx=2, sticky=tk.EW)
+            var = tk.StringVar()
+            ttk.Entry(pad_notes_frame, textvariable=var, width=8).grid(
+                row=base_row + 1, column=col, padx=2, pady=(0, 4), sticky=tk.EW)
+            pad_note_vars[pad] = var
+            pad_notes_frame.columnconfigure(col, weight=1)
 
         detail_btn_row = ttk.Frame(right_frame)
         detail_btn_row.pack(fill=tk.X, pady=(6, 0))
-
-        # Snapshot history
-        snap_history_label = ttk.Label(right_frame, text="SNAPSHOT HISTORY", font=("Courier", 10, "bold"))
-        snap_history_label.pack(anchor=tk.W, pady=(12, 4))
-
-        snap_cols = ("timestamp", "type")
-        snap_tree = ttk.Treeview(right_frame, columns=snap_cols, show="headings", height=8, style="Library.Treeview")
-        snap_tree.heading("timestamp", text="Snapshot")
-        snap_tree.heading("type", text="Type")
-        snap_tree.column("timestamp", width=180)
-        snap_tree.column("type", width=200)
-        snap_tree.pack(fill=tk.BOTH, expand=True)
-
-        snap_btn_row = ttk.Frame(right_frame)
-        snap_btn_row.pack(fill=tk.X, pady=(6, 0))
 
         # ── State ─────────────────────────────────────────────────────────────
         current_card: list = [None]   # list-of-one to allow mutation in closures
@@ -5601,51 +5591,39 @@ Velocity:
             return cards
 
         def refresh_card_list():
-            for item in card_tree.get_children():
-                card_tree.delete(item)
+            active_name = current_card[0].name if current_card[0] else None
+            existing = set(card_tree.get_children())
+            seen = set()
             for card in get_all_cards():
-                card_tree.insert("", tk.END, iid=card.name, values=(card.name, card.device, card.author))
-
-        def refresh_snap_list():
-            for item in snap_tree.get_children():
-                snap_tree.delete(item)
-            # Physical card takes priority when open; fall back to selected virtual card
-            if active_smpinfo[0] is not None:
-                snap_source = "PHYSICAL_CARD"
-            elif current_card[0] is not None:
-                snap_source = current_card[0].name
-            else:
-                return
-            snap_history_label.config(text=f"SNAPSHOT HISTORY — {snap_source}")
-            for snap in self.smartmedia_lib.list_snapshots(snap_source):
-                parts = snap.name.split("_", 2)
-                # format: YYYY-MM-DD_HH-MM-SS[_suffix]
-                ts = f"{parts[0]} {parts[1].replace('-', ':')}" if len(parts) >= 2 else snap.name
-                suffix = parts[2] if len(parts) > 2 else ""
-                if not suffix:
-                    snap_type = "Auto"
-                elif suffix.lower() == "backup":
-                    snap_type = "Backup"
+                tag = ("active",) if card.name == active_name else ()
+                ptn_dot = "●" if self.smartmedia_lib.card_has_patterns(card.name) else "○"
+                if card.name in existing:
+                    card_tree.item(card.name, values=(card.name, card.author, ptn_dot), tags=tag)
                 else:
-                    snap_type = suffix
-                snap_tree.insert("", tk.END, iid=str(snap), values=(ts, snap_type))
+                    card_tree.insert("", tk.END, iid=card.name, values=(card.name, card.author, ptn_dot), tags=tag)
+                seen.add(card.name)
+            for stale in existing - seen:
+                card_tree.delete(stale)
 
         def on_card_select(event=None):
             sel = card_tree.selection()
+            for item in card_tree.get_children():
+                card_tree.item(item, tags=())
             if not sel:
                 current_card[0] = None
                 return
+            card_tree.item(sel[0], tags=("active",))
             card = self.smartmedia_lib.get_card(sel[0])
             if card is None:
                 return
             current_card[0] = card
             name_var.set(card.name)
-            device_var.set(card.device)
             author_var.set(card.author)
             categories_var.set(", ".join(card.categories))
             tags_var.set(", ".join(card.tags))
             wp_var.set(card.write_protect)
-            refresh_snap_list()
+            for pad, var in pad_note_vars.items():
+                var.set(card.pad_notes.get(pad, ""))
 
         card_tree.bind("<<TreeviewSelect>>", on_card_select)
         search_var.trace_add("write", lambda *_: refresh_card_list())
@@ -5655,11 +5633,14 @@ Velocity:
             if card is None:
                 return
             card.name = name_var.get().strip()
-            card.device = device_var.get().strip()
             card.author = author_var.get().strip()
             card.categories = [c.strip() for c in categories_var.get().split(",") if c.strip()]
             card.tags = [t.strip() for t in tags_var.get().split(",") if t.strip()]
+            card.pad_notes = {pad: var.get().strip() for pad, var in pad_note_vars.items() if var.get().strip()}
             card.write_protect = wp_var.get()
+            if card.author:
+                self.config["last_author"] = card.author
+                self.save_config()
             self.smartmedia_lib.save_card(card)
             refresh_card_list()
 
@@ -5689,89 +5670,90 @@ Velocity:
                 self.smartmedia_lib.delete_card(card.name)
                 current_card[0] = None
                 refresh_card_list()
-                refresh_snap_list()
 
-        def backup_now():
+        def restore_to_card():
             card = current_card[0]
             if card is None:
-                messagebox.showinfo("Backup Now", "Select a card first.", parent=dialog)
+                messagebox.showinfo("Restore to Card", "Select a virtual card first.", parent=dialog)
                 return
-            label = simpledialog.askstring("Snapshot Label", "Label (leave blank for 'backup'):", parent=dialog)
-            if label is None:
+            sp0_files = list((self.smartmedia_lib.cards_dir / card.name).glob("*.SP0"))
+            if not sp0_files:
+                messagebox.showwarning("Restore to Card", f"'{card.name}' has no SP0 files to restore.", parent=dialog)
                 return
-            snap = self.smartmedia_lib.create_snapshot(card.name, label.strip() or "backup")
-            refresh_snap_list()
-            messagebox.showinfo("Backup Now", f"Snapshot created:\n{snap}", parent=dialog)
-
-        def rename_snapshot():
-            sel = snap_tree.selection()
-            if not sel:
-                messagebox.showinfo("Rename", "Select a snapshot first.", parent=dialog)
-                return
-            card = current_card[0]
-            if card is None:
-                return
-            snap_path = Path(sel[0])
-            new_label = simpledialog.askstring("Rename Snapshot", "New label:", parent=dialog)
-            if new_label is None:
-                return
-            self.smartmedia_lib.rename_snapshot(card.name, snap_path, new_label.strip())
-            refresh_snap_list()
-
-        def restore_snapshot():
-            sel = snap_tree.selection()
-            if not sel:
-                messagebox.showinfo("Restore", "Select a snapshot first.", parent=dialog)
-                return
-            card = current_card[0]
-            if card is None:
-                return
-            if card.write_protect:
-                messagebox.showwarning("Restore", "Card is write-protected.", parent=dialog)
-                return
-            snap_path = Path(sel[0])
             preferred = Path("/Volumes/BOSS DATA")
             target = preferred if preferred.exists() else self.get_library_paths()["outgoing"]
-            if not messagebox.askyesno("Restore Snapshot",
-                                       f"Restore snapshot to:\n{target}\n\nThis will overwrite files. Continue?",
+            if not messagebox.askyesno("Restore to Card",
+                                       f"Restore '{card.name}' to:\n{target}\n\nThis will overwrite files. Continue?",
                                        parent=dialog):
                 return
             try:
-                self.smartmedia_lib.restore_snapshot(snap_path, card, target)
-                messagebox.showinfo("Restore", f"Restored to {target}", parent=dialog)
+                self.smartmedia_lib.restore_card(card.name, target)
+                messagebox.showinfo("Restore to Card", f"Restored to {target}", parent=dialog)
             except Exception as exc:
-                messagebox.showerror("Restore", str(exc), parent=dialog)
+                messagebox.showerror("Restore to Card", str(exc), parent=dialog)
 
         def open_in_manager():
             if active_smpinfo[0] is None:
                 messagebox.showinfo(
-                    "SmartMedia Manager",
+                    "Sample Manager",
                     "Open a card first using the Open Card button.",
                     parent=dialog,
                 )
                 return
-            self.on_custom_pad_assignment(smpinfo_path=active_smpinfo[0])
+            self.on_sample_manager(smpinfo_path=active_smpinfo[0])
+
+        def create_virtual_card_from_physical():
+            if active_smpinfo[0] is None:
+                messagebox.showinfo(
+                    "Create Virtual Card",
+                    "Open a physical card first using the Open Card button.",
+                    parent=dialog,
+                )
+                return
+            source_dir = active_smpinfo[0].parent
+            suggested = source_dir.name if source_dir.name != "BOSS DATA" else ""
+            name = simpledialog.askstring(
+                "Create Virtual Card", "Name for this virtual card:", initialvalue=suggested, parent=dialog
+            )
+            if not name or not name.strip():
+                return
+            name = name.strip()
+            if self.smartmedia_lib.get_card(name):
+                messagebox.showwarning("Create Virtual Card", f"A card named '{name}' already exists.", parent=dialog)
+                return
+            card = VirtualCard(name=name, author=author_var.get().strip())
+            self.smartmedia_lib.create_card(card)
+            sp0_files = sorted(source_dir.glob("*.SP0"))
+            self.smartmedia_lib.import_sp0_files(name, source_dir, auto_backup=False)
+            card_dir = self.smartmedia_lib.cards_dir / name
+            active_smpinfo[0] = card_dir / "SMPINFO0.SP0"
+            open_card_status_var.set(f"Open: {name}")
+            refresh_card_list()
+            card_tree.selection_set(name)
+            on_card_select()
+            messagebox.showinfo(
+                "Create Virtual Card",
+                f"Created '{name}' with {len(sp0_files)} file(s) imported from {source_dir.name}.",
+                parent=dialog,
+            )
 
         # Wire up buttons
         ttk.Button(left_btn_row, text="New Card", command=new_card).pack(side=tk.LEFT, padx=(0, 6))
         ttk.Button(left_btn_row, text="Delete Card", command=delete_card).pack(side=tk.LEFT, padx=(0, 6))
 
         ttk.Button(detail_btn_row, text="Save Changes", command=save_current_card).pack(side=tk.LEFT, padx=(0, 6))
-        ttk.Button(detail_btn_row, text="Open in SmartMedia Manager", command=open_in_manager).pack(side=tk.LEFT, padx=(0, 6))
-
-        ttk.Button(snap_btn_row, text="Backup Now", command=backup_now).pack(side=tk.LEFT, padx=(0, 6))
-        ttk.Button(snap_btn_row, text="Rename", command=rename_snapshot).pack(side=tk.LEFT, padx=(0, 6))
-        ttk.Button(snap_btn_row, text="Restore", command=restore_snapshot).pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Button(detail_btn_row, text="Restore to Card", command=restore_to_card).pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Button(detail_btn_row, text="Open in Sample Manager", command=open_in_manager).pack(side=tk.LEFT, padx=(0, 6))
 
         ttk.Button(frame, text="Close", command=dialog.destroy).pack(side=tk.BOTTOM, anchor=tk.E, pady=(8, 0))
 
         refresh_card_list()
 
-    def on_custom_pad_assignment(self, smpinfo_path: Optional[Path] = None):
+    def on_sample_manager(self, smpinfo_path: Optional[Path] = None):
         session = AssignmentSession()
         dialog = tk.Toplevel(self.root)
         card_label = smpinfo_path.parent.name if smpinfo_path else "No card loaded"
-        dialog.title(f"SmartMedia Manager — {card_label}" if smpinfo_path else "SmartMedia Manager")
+        dialog.title(f"Sample Manager — {card_label}" if smpinfo_path else "Sample Manager")
         dialog.geometry("1180x680")
         dialog.transient(self.root)
         dialog.grab_set()
@@ -5780,7 +5762,7 @@ Velocity:
         frame = ttk.Frame(dialog, padding=10)
         frame.pack(fill=tk.BOTH, expand=True)
 
-        ttk.Label(frame, text="SmartMedia Manager", font=("Courier", 13, "bold")).pack(anchor=tk.W, pady=(0, 2))
+        ttk.Label(frame, text="Sample Manager", font=("Courier", 13, "bold")).pack(anchor=tk.W, pady=(0, 2))
         ttk.Label(frame, text="Helps you manage the samples on your SmartMedia card. You can also reorganise the order by dragging them into new positions.").pack(anchor=tk.W, pady=(0, 4))
         ttk.Label(
             frame,
@@ -5921,7 +5903,7 @@ Velocity:
         def selected_slot() -> Optional[int]:
             selected = tree.selection()
             if not selected:
-                messagebox.showinfo("SmartMedia Manager", "Select a pad first.", parent=dialog)
+                messagebox.showinfo("Sample Manager", "Select a pad first.", parent=dialog)
                 return None
             return int(selected[0])
 
@@ -6095,7 +6077,7 @@ Velocity:
                 refresh_tree()
                 self.set_loaded_card_context(str(source_dir))
                 self.update_status(f"Loaded card setup: {path}")
-                dialog.title(f"SmartMedia Manager — {source_dir.name}")
+                dialog.title(f"Sample Manager — {source_dir.name}")
                 log.info("Card opened: %s (%d slots populated)", path, sum(1 for s in smpinfo.slots if not s.is_empty))
                 if missing_files:
                     messagebox.showwarning(
@@ -6184,13 +6166,6 @@ Velocity:
                 confirm_dialog.update()
                 log.info("Write to card started: %s", output_dir)
                 try:
-                    existing_smpinfo = output_dir / "SMPINFO0.SP0"
-                    if existing_smpinfo.exists():
-                        try:
-                            snap = self.smartmedia_lib.create_snapshot("PHYSICAL_CARD")
-                            shutil.copy2(existing_smpinfo, snap / existing_smpinfo.name)
-                        except Exception:
-                            pass
 
                     results = session.prepare_card(output_dir)
                     smpinfo_out = output_dir / "SMPINFO0.SP0"
@@ -6281,12 +6256,6 @@ Velocity:
                     confirm_dialog.title("Write Complete")
                     self.update_status("Custom pad assignment complete")
                     log.info("Write to card complete: %s", output_dir)
-                    # Auto-snapshot written card state
-                    try:
-                        snap_name = "PHYSICAL_CARD" if output_dir == Path("/Volumes/BOSS DATA") else output_dir.name
-                        self.smartmedia_lib.create_snapshot(snap_name)
-                    except Exception:
-                        pass
                     baseline_assignments.clear()
                     baseline_assignments.update(current_assignment_snapshot())
                     baseline_gate_state.clear()
@@ -6702,7 +6671,7 @@ Welcome! Here's everything you need to get going.
 2. Load Samples onto Your Card
    Got a folder of WAVs? Go to Samples -> Quick Import WAV Folder and point
    it at your folder. Dr. Sidekick handles the conversion and drops everything
-   into BOSS DATA_OUTGOING ready to load onto the SP-303.
+   into Cards/BOSS DATA_OUTGOING ready to load onto the SP-303.
 
    If you have more than 8 samples, they'll be split into BANK_LOAD_01,
    BANK_LOAD_02 etc. — just load one bank at a time on the device.
@@ -6719,9 +6688,9 @@ Welcome! Here's everything you need to get going.
    Load the BANK_LOAD folders onto your SP-303 one at a time.
 
 
-4. Reassign Pads (SmartMedia Manager)
+4. Reassign Pads (Sample Manager)
    Want to change which sample lives on which pad? Go to
-   Samples -> SmartMedia Manager, load your card setup, make your changes,
+   Samples -> Sample Manager, load your card setup, make your changes,
    then hit Write Changes to Card.
 
    Tip: always back up first — use Backup Card before making any changes.
@@ -6748,7 +6717,7 @@ Goal: Get your own samples onto the SP-303 and program a beat
 
 Step 1 — Load your samples onto the card.
   Samples -> Quick Import WAV Folder -> select your kit folder.
-  Files are prepared in User-Library/BOSS DATA_OUTGOING.
+  Files are prepared in SmartMedia-Library/Cards/BOSS DATA_OUTGOING.
   If more than 8 WAVs, load BANK_LOAD_01 first, then BANK_LOAD_02
   on the device. Samples land on pads A1–D8 in file order.
 
@@ -6807,11 +6776,11 @@ Example 3: Reorganize a Card Without Losing Anything
 Goal: Safely reassign pads and shuffle patterns on an existing card.
 
 Step 1 — Back up first.
-  Samples -> SmartMedia Manager -> Backup Card.
-  A timestamped backup folder is created in User-Library/Backups.
+  Samples -> Sample Manager -> Backup Card.
+  A backup is created in Backup/ next to SmartMedia-Library.
 
 Step 2 — Load the current card setup.
-  Samples -> SmartMedia Manager -> Load Card Setup.
+  Samples -> Sample Manager -> Load Card Setup.
   All current pad assignments appear in the table.
 
 Step 3 — Reassign pads.
@@ -6823,7 +6792,7 @@ Step 4 — Remap or exchange patterns.
   to move patterns between slots without re-programming.
 
 Step 5 — Write changes.
-  Samples -> SmartMedia Manager -> Write Changes to Card.
+  Samples -> Sample Manager -> Write Changes to Card.
   Eject safely and verify on device.
   If anything is wrong, restore from the backup created in Step 1.
 """
@@ -6840,7 +6809,7 @@ Q: Why do I get BANK_LOAD_01 folders?
 A: More than 8 WAV files were found. SP-303 loads one bank (8 samples) at a time.
 
 Q: Where are Quick Import files written?
-A: /Volumes/BOSS DATA or User-Library/BOSS DATA_OUTGOING.
+A: /Volumes/BOSS DATA or SmartMedia-Library/Cards/BOSS DATA_OUTGOING.
 
 Q: Existing WAVs disappeared from BOSS DATA_OUTGOING.
 A: They are archived into the subfolder wav_archive_YYYYMMDD_HHMMSS.
@@ -6848,7 +6817,7 @@ A: They are archived into the subfolder wav_archive_YYYYMMDD_HHMMSS.
 Q: Write Changes completed, but device did not reflect changes.
 A: Most common causes:
 - Card not ejected safely before inserting into SP-303
-- Wrong target output path selected check in both /Volumes/BOSS DATA and /BOSS DATA_OUTGOING/
+- Wrong target output path selected check in both /Volumes/BOSS DATA and Cards/BOSS DATA_OUTGOING/
 
 Q: I used Convert MPC1000 Program and some pads say NOT FOUND.
 A: The .pgm stores sample names without file extensions, and matching is
