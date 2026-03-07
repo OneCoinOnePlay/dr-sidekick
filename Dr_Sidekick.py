@@ -31,6 +31,9 @@ import urllib.error
 import urllib.request
 import threading
 import wave
+import os
+import subprocess
+import tempfile
 
 # ── Session logger ────────────────────────────────────────────────────────────
 _LOG_PATH = Path(__file__).parent / "Dr_Sidekick.log"
@@ -951,6 +954,178 @@ class PadMapping:
         return cls(pad_index=pad_number - 1)
 
 
+# ── SP-303 RDAC MT1 decoder ───────────────────────────────────────────────────
+# Ported from RDAC decode research by Randy Gordon (randy@integrand.com), LGPL 2006.
+# Decodes SP-303 .SP0 sample files (RDAC MT1 compression) to raw 16-bit PCM.
+
+_SP303_RDAC_PATTERNS = [
+    0, 0, 0, 0,  1, 1, 1, 1,  2, 2, 2, 2,  3, 3, 3, 3,
+    0, 0, 0, 0,  1, 1, 1, 1,  2, 2, 2, 2,  3, 3, 3, 3,
+    0, 0, 0, 0,  1, 1, 1, 1,  2, 2, 2, 2,  3, 3, 3, 3,
+    0, 0, 0, 0,  1, 1, 1, 1,  2, 2, 2, 2,  3, 3, 3, 3,
+    4, 4, 4, 4,  5, 5, 5, 5,  6, 6, 6, 6,  7, 7, 7, 7,
+    4, 4, 4, 4,  5, 5, 5, 5,  6, 6, 6, 6,  7, 7, 7, 7,
+    4, 4, 4, 4,  5, 5, 5, 5,  6, 6, 6, 6,  7, 7, 7, 7,
+    4, 4, 4, 4,  5, 5, 5, 5,  6, 6, 6, 6,  7, 7, 7, 7,
+    8,  8,  8,  8,  9,  9,  9,  9,  10, 10, 10, 10, 11, 11, 11, 11,
+    8,  8,  8,  8,  9,  9,  9,  9,  10, 10, 10, 10, 11, 11, 11, 11,
+    8,  8,  8,  8,  9,  9,  9,  9,  10, 10, 10, 10, 11, 11, 11, 11,
+    8,  8,  8,  8,  9,  9,  9,  9,  10, 10, 10, 10, 11, 11, 11, 11,
+    12, 12, 13, 13, 14, 14, 15, 15, 16, 16, 17, 17, 18, 18, 19, 19,
+    12, 12, 13, 13, 14, 14, 15, 15, 16, 16, 17, 17, 18, 18, 19, 19,
+    20, 20, 21, 21, 22, 22, 23, 23, 24, 24, 25, 26, 27, 28, 29, 30,
+    20, 20, 21, 21, 22, 22, 23, 23, 24, 24, 31, 32, 33, 34, 35, 36,
+]
+
+def _sp303_p(s): return s.replace(' ', '')
+_SP303_PAT_A  = _sp303_p("ppp88888 88888888 pppggggg gggggggg 87777776 66666655 gffffffe eeeeeedd"
+                          " 55554444 44444333 ddddcccc cccccbbb 33322222 22111111 bbbaaaaa aa999999")
+_SP303_PAT_B  = _sp303_p("pp888888 88888887 ppgggggg gggggggf 77777666 66666555 fffffeee eeeeeddd"
+                          " 55544444 44443333 dddccccc ccccbbbb 33222222 22111111 bbaaaaaa aa999999")
+_SP303_PAT_B3 = _sp303_p("ppp88888 88888887 pppggggg gggggggf 77777666 66666555 fffffeee eeeeeddd"
+                          " 55544444 44443333 dddccccc ccccbbbb 33222222 22111111 bbaaaaaa aa999999")
+_SP303_PAT_C  = _sp303_p("ppp88888 88888877 pppggggg ggggggff 77776666 66665555 ffffeeee eeeedddd"
+                          " 55444444 44443333 ddcccccc ccccbbbb 33222222 22111111 bbaaaaaa aa999999")
+_SP303_PAT_D  = _sp303_p("pp888888 88877777 ppgggggg gggfffff 77666666 66555555 ffeeeeee eedddddd"
+                          " 54444444 44333333 dccccccc ccbbbbbb 32222222 21111111 baaaaaaa a9999999")
+_SP303_PAT_E  = _sp303_p("pppp8888 88888877 ppppgggg ggggggff 77776666 66665555 ffffeeee eeeedddd"
+                          " 55444444 44443333 ddcccccc ccccbbbb 33222222 22111111 bbaaaaaa aa999999")
+_SP303_PAT_F  = _sp303_p("pppp8888 88887777 ppppgggg ggggffff 77766666 66655555 fffeeeee eeeddddd"
+                          " 55444444 44333333 ddcccccc ccbbbbbb 32222222 21111111 baaaaaaa a9999999")
+
+_SP303_SYM = {c: i for i, c in enumerate('123456789abcdefg')}
+_SP303_SYM['p'] = -1
+
+
+def _sp303_apply_pattern(block, pattern):
+    out, out_pos = [0] * 16, [0] * 16
+    for in_pos in range(15, -1, -1):
+        byte_pat = pattern[in_pos * 8: in_pos * 8 + 8]
+        byte_val = block[in_pos]
+        for bit_pos in range(8):
+            out_idx = _SP303_SYM[byte_pat[7 - bit_pos]]
+            if out_idx == -1:
+                continue
+            if (byte_val >> bit_pos) & 1:
+                out[out_idx] |= 1 << out_pos[out_idx]
+            out_pos[out_idx] += 1
+    for i in range(16):
+        if out_pos[i] > 0:
+            mask = 1 << (out_pos[i] - 1)
+            out[i] = -(out[i] & mask) | out[i]
+    return out
+
+
+def _sp303_shift_round(out, pos):
+    half = 1 << (pos - 1)
+    for i in range(16):
+        out[i] = (out[i] << pos) | half
+
+
+def _sp303_interp(a, b):
+    s = a + b
+    return -((-s + 1) // 2) if s < 0 else s // 2
+
+
+def _sp303_interp2(d0, out):
+    out[3]  += _sp303_interp(d0,      out[7]);  out[1]  += _sp303_interp(d0,      out[3])
+    out[5]  += _sp303_interp(out[3],  out[7]);  out[11] += _sp303_interp(out[7],  out[15])
+    out[9]  += _sp303_interp(out[7],  out[11]); out[13] += _sp303_interp(out[11], out[15])
+    out[0]  += _sp303_interp(d0,      out[1]);  out[2]  += _sp303_interp(out[1],  out[3])
+    out[4]  += _sp303_interp(out[3],  out[5]);  out[6]  += _sp303_interp(out[5],  out[7])
+    out[8]  += _sp303_interp(out[7],  out[9]);  out[10] += _sp303_interp(out[9],  out[11])
+    out[12] += _sp303_interp(out[11], out[13]); out[14] += _sp303_interp(out[13], out[15])
+
+
+def _sp303_interp4(d0, out):
+    out[1]  += _sp303_interp(d0,      out[3]);  out[5]  += _sp303_interp(out[3],  out[7])
+    out[9]  += _sp303_interp(out[7],  out[11]); out[13] += _sp303_interp(out[11], out[15])
+    out[0]  += _sp303_interp(d0,      out[1]);  out[2]  += _sp303_interp(out[1],  out[3])
+    out[4]  += _sp303_interp(out[3],  out[5]);  out[6]  += _sp303_interp(out[5],  out[7])
+    out[8]  += _sp303_interp(out[7],  out[9]);  out[10] += _sp303_interp(out[9],  out[11])
+    out[12] += _sp303_interp(out[11], out[13]); out[14] += _sp303_interp(out[13], out[15])
+
+
+def _sp303_interp8(d0, out):
+    out[0]  += _sp303_interp(d0,      out[1]);  out[2]  += _sp303_interp(out[1],  out[3])
+    out[4]  += _sp303_interp(out[3],  out[5]);  out[6]  += _sp303_interp(out[5],  out[7])
+    out[8]  += _sp303_interp(out[7],  out[9]);  out[10] += _sp303_interp(out[9],  out[11])
+    out[12] += _sp303_interp(out[11], out[13]); out[14] += _sp303_interp(out[13], out[15])
+
+
+def _sp303_clamp16(out):
+    for i in range(16):
+        out[i] = max(-32768, min(32767, out[i]))
+
+
+def _sp303_decode_mt1(d0: int, block: bytes) -> List[int]:
+    """Decode one 16-byte MT1 RDAC block. d0 is the last sample of the previous block."""
+    p = _SP303_RDAC_PATTERNS[(block[0] & 0xf0) | ((block[2] & 0xf0) >> 4)]
+    out = [0] * 16
+    if   p == 2:  out = _sp303_apply_pattern(block, _SP303_PAT_B);                            _sp303_interp2(d0, out)
+    elif p == 3:  out = _sp303_apply_pattern(block, _SP303_PAT_B);  _sp303_shift_round(out, 1); _sp303_interp2(d0, out)
+    elif p == 4:  out = _sp303_apply_pattern(block, _SP303_PAT_B);  _sp303_shift_round(out, 2); _sp303_interp2(d0, out)
+    elif p == 5:  out = _sp303_apply_pattern(block, _SP303_PAT_B);  _sp303_shift_round(out, 3); _sp303_interp2(d0, out)
+    elif p == 6:  out = _sp303_apply_pattern(block, _SP303_PAT_D);  _sp303_shift_round(out, 2); _sp303_interp4(d0, out)
+    elif p == 7:  out = _sp303_apply_pattern(block, _SP303_PAT_D);  _sp303_shift_round(out, 3); _sp303_interp4(d0, out)
+    elif p == 8:  out = _sp303_apply_pattern(block, _SP303_PAT_D);  _sp303_shift_round(out, 4); _sp303_interp4(d0, out)
+    elif p == 9:  out = _sp303_apply_pattern(block, _SP303_PAT_D);  _sp303_shift_round(out, 5); _sp303_interp4(d0, out)
+    elif p == 10: out = _sp303_apply_pattern(block, _SP303_PAT_D);  _sp303_shift_round(out, 6); _sp303_interp4(d0, out)
+    elif p == 11: out = _sp303_apply_pattern(block, _SP303_PAT_D);  _sp303_shift_round(out, 7); _sp303_interp4(d0, out)
+    elif p == 15: out = _sp303_apply_pattern(block, _SP303_PAT_A);                            _sp303_interp2(d0, out)
+    elif p == 16: out = _sp303_apply_pattern(block, _SP303_PAT_A);  _sp303_shift_round(out, 1); _sp303_interp2(d0, out)
+    elif p == 17: out = _sp303_apply_pattern(block, _SP303_PAT_A);  _sp303_shift_round(out, 2); _sp303_interp2(d0, out)
+    elif p == 18: out = _sp303_apply_pattern(block, _SP303_PAT_B3); _sp303_shift_round(out, 4); _sp303_interp2(d0, out)
+    elif p == 19: out = _sp303_apply_pattern(block, _SP303_PAT_C);                            _sp303_interp2(d0, out)
+    elif p == 20: out = _sp303_apply_pattern(block, _SP303_PAT_C);  _sp303_shift_round(out, 1); _sp303_interp2(d0, out)
+    elif p == 21: out = _sp303_apply_pattern(block, _SP303_PAT_C);  _sp303_shift_round(out, 2); _sp303_interp2(d0, out)
+    elif p == 22: out = _sp303_apply_pattern(block, _SP303_PAT_C);  _sp303_shift_round(out, 3); _sp303_interp2(d0, out)
+    elif p == 23: out = _sp303_apply_pattern(block, _SP303_PAT_C);  _sp303_shift_round(out, 4); _sp303_interp2(d0, out)
+    elif p == 24: out = _sp303_apply_pattern(block, _SP303_PAT_C);  _sp303_shift_round(out, 5); _sp303_interp2(d0, out)
+    elif p == 25: out = _sp303_apply_pattern(block, _SP303_PAT_F);  _sp303_shift_round(out, 4); _sp303_interp8(d0, out)
+    elif p == 26: out = _sp303_apply_pattern(block, _SP303_PAT_F);  _sp303_shift_round(out, 5); _sp303_interp8(d0, out)
+    elif p == 27: out = _sp303_apply_pattern(block, _SP303_PAT_F);  _sp303_shift_round(out, 6); _sp303_interp8(d0, out)
+    elif p == 28: out = _sp303_apply_pattern(block, _SP303_PAT_F);  _sp303_shift_round(out, 7); _sp303_interp8(d0, out)
+    elif p == 29: out = _sp303_apply_pattern(block, _SP303_PAT_F);  _sp303_shift_round(out, 8); _sp303_interp8(d0, out)
+    elif p == 30:
+        out = _sp303_apply_pattern(block, _SP303_PAT_F); _sp303_shift_round(out, 8)
+        for i in range(0, 16, 2): out[i] <<= 1
+    elif p == 31: out = _sp303_apply_pattern(block, _SP303_PAT_E);  _sp303_shift_round(out, 6); _sp303_interp4(d0, out)
+    _sp303_clamp16(out)
+    return out
+
+
+def sp303_decode_sp0(path: str) -> List[int]:
+    """Decode an SP0 file to a flat list of 16-bit PCM samples (32000 Hz native)."""
+    file_size = os.path.getsize(path)
+    samples: List[int] = []
+    d0 = 0
+    with open(path, 'rb') as f:
+        for _ in range(file_size // 16):
+            block = f.read(16)
+            if len(block) < 16:
+                break
+            chunk = _sp303_decode_mt1(d0, block)
+            samples.extend(chunk)
+            d0 = chunk[15]
+    return samples
+
+
+def sp303_write_wav(f, num_samples: int, sample_rate: int, num_channels: int = 1) -> None:
+    """Write a 16-bit PCM WAV header then expect the caller to write the sample data."""
+    num_bytes = num_samples * 2 * num_channels
+    f.write(b'RIFF'); f.write(struct.pack('<I', num_bytes + 38))
+    f.write(b'WAVE'); f.write(b'fmt '); f.write(struct.pack('<I', 18))
+    f.write(struct.pack('<H', 1))                          # PCM
+    f.write(struct.pack('<H', num_channels))
+    f.write(struct.pack('<I', sample_rate))
+    f.write(struct.pack('<I', sample_rate * 2 * num_channels))
+    f.write(struct.pack('<H', 2 * num_channels))
+    f.write(struct.pack('<H', 16))                         # bits per sample
+    f.write(struct.pack('<H', 0))                          # extra params
+    f.write(b'data'); f.write(struct.pack('<I', num_bytes))
+
+
 class SMPINFO:
     """
     Complete SMPINFO0.SP0 file handler
@@ -1694,6 +1869,20 @@ class SmartMediaLibrary:
         with open(card.path / "card.json", "w", encoding="utf-8") as f:
             json.dump(card.to_dict(), f, indent=2)
 
+    def rename_card(self, card: "VirtualCard", new_name: str):
+        """Rename the card folder on disk and update card.name and card.path."""
+        new_name = new_name.strip()
+        if not new_name or new_name == card.name:
+            return
+        old_path = card.path
+        new_path = self.cards_dir / new_name
+        if new_path.exists():
+            raise ValueError(f"A card named '{new_name}' already exists.")
+        old_path.rename(new_path)
+        card.name = new_name
+        card.path = new_path
+        log.info("Card renamed: %s → %s", old_path.name, new_name)
+
     def delete_card(self, name: str):
         card_dir = self.cards_dir / name
         if card_dir.exists():
@@ -1762,7 +1951,7 @@ class AssignmentSession:
                 continue
             bank = "C" if slot < 8 else "D"
             pad = (slot % 8) + 1
-            lines.append(f"{slot:02d} ({bank}{pad}): {source.source_type.value} -> {source.path.name}")
+            lines.append(f"{slot:02d} ({bank}{pad}): {source.source_type.value} -> {source.source_path.name}")
         return lines
 
 
@@ -2062,7 +2251,7 @@ SLOT_COUNT = 16
 DEFAULT_PATTERN_LENGTH_BARS = 4  # Default pattern length
 MAX_PATTERN_LENGTH_BARS = 99  # SP-303 hardware maximum
 TUPLE_ZONE_MAX_BYTES = 0x272 - 0x70  # PTNDATA event payload capacity per pattern slot
-APP_VERSION = "0.3.0"
+APP_VERSION = "0.4.0"
 
 
 def load_midi_notes_by_channel(midi_path: str) -> Tuple[Dict[int, List[Tuple[int, int, int]]], int]:
@@ -3489,25 +3678,168 @@ class PianoRollCanvas(tk.Canvas):
             self.redraw()
 
 
-class SP303PatternEditor:
-    """Main application window"""
+def show_text_dialog(parent: tk.Widget, title: str, content: str, geometry: str = "1024x640"):
+    dialog = tk.Toplevel(parent)
+    dialog.title(title)
+    dialog.geometry(geometry)
+    dialog.transient(parent)
+    dialog.grab_set()
+    dialog.configure(bg="#000000")
 
-    def __init__(self, root, debug_mode: bool = False):
+    frame = ttk.Frame(dialog, padding=10)
+    frame.pack(fill=tk.BOTH, expand=True)
+
+    text_frame = ttk.Frame(frame)
+    text_frame.pack(fill=tk.BOTH, expand=True)
+
+    text = tk.Text(
+        text_frame,
+        wrap="none",
+        font=("TkFixedFont", 11),
+        bg="#000000",
+        fg="#ffffff",
+        insertbackground="#ffffff",
+        relief=tk.FLAT,
+        highlightthickness=0,
+    )
+    text.insert("1.0", content)
+    text.configure(state=tk.DISABLED)
+    text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+    y_scroll = ttk.Scrollbar(text_frame, orient=tk.VERTICAL, command=text.yview)
+    y_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+    text.configure(yscrollcommand=y_scroll.set)
+
+    x_scroll = ttk.Scrollbar(frame, orient=tk.HORIZONTAL, command=text.xview)
+    x_scroll.pack(fill=tk.X)
+    text.configure(xscrollcommand=x_scroll.set)
+
+
+
+class AppState:
+    """Shared application state — config, SmartMedia library, and filesystem helpers."""
+
+    def __init__(self):
+        self.smartmedia_library_root = Path(__file__).parent / "SmartMedia-Library"
+        self.smartmedia_library_root.mkdir(parents=True, exist_ok=True)
+        self.smartmedia_lib = SmartMediaLibrary(self.smartmedia_library_root)
+        self.load_config()
+        self.ensure_library_dirs()
+
+    # ── Config ───────────────────────────────────────────────────────────
+
+    def load_config(self):
+        """Load app config from JSON file, migrating old recent files if present."""
+        self.config: dict = {
+            "device": "BOSS Dr. Sample SP-303",
+            "card_mount_path": "",
+            "write_to_card": True,
+            "recent_files": [],
+        }
+        config_path = Path(__file__).parent / "dr_sidekick_config.json"
+        if config_path.exists():
+            try:
+                with open(config_path, "r", encoding="utf-8") as f:
+                    saved = json.load(f)
+                self.config.update(saved)
+            except Exception:
+                pass
+        # Migrate old recent files file
+        old_path = Path.home() / ".dr_sidekick_recent"
+        if old_path.exists() and not self.config.get("recent_files"):
+            try:
+                lines = old_path.read_text(encoding="utf-8").splitlines()
+                self.config["recent_files"] = [l.strip() for l in lines if l.strip()]
+                self.save_config()
+                old_path.unlink(missing_ok=True)
+            except Exception:
+                pass
+
+    def save_config(self):
+        """Save app config to JSON file."""
+        config_path = Path(__file__).parent / "dr_sidekick_config.json"
+        try:
+            with open(config_path, "w", encoding="utf-8") as f:
+                json.dump(self.config, f, indent=2)
+        except Exception:
+            pass
+
+    # ── Library paths / dirs ─────────────────────────────────────────────
+
+    def get_library_paths(self) -> dict:
+        return {
+            "root": self.smartmedia_library_root,
+            "cards": self.smartmedia_library_root / "Cards",
+            "incoming": self.smartmedia_library_root / "Cards" / "BOSS DATA_INCOMING",
+            "outgoing": self.smartmedia_library_root / "Cards" / "BOSS DATA_OUTGOING",
+        }
+
+    def ensure_library_dirs(self):
+        self.smartmedia_lib.ensure_dirs()
+        for name in ("BOSS DATA_INCOMING", "BOSS DATA_OUTGOING"):
+            if self.smartmedia_lib.get_card(name) is None:
+                self.smartmedia_lib.create_card(VirtualCard(name=name, author="Dr. Sample"))
+
+    def default_card_mount_dir(self) -> Path:
+        if sys.platform == "darwin":
+            preferred = Path("/Volumes/BOSS DATA")
+            if preferred.exists():
+                return preferred
+            incoming = self.get_library_paths()["incoming"]
+            return incoming if incoming.exists() else Path("/Volumes")
+
+        config_path = self.config.get("card_mount_path", "")
+        if config_path:
+            candidate = Path(config_path)
+            if candidate.exists():
+                return candidate
+
+        outgoing = self.get_library_paths()["outgoing"]
+        return outgoing if outgoing.exists() else Path.cwd()
+
+    def default_pattern_open_dir(self) -> Path:
+        preferred = Path("/Volumes/BOSS DATA")
+        if preferred.exists():
+            return preferred
+        incoming = self.get_library_paths()["incoming"]
+        if incoming.exists():
+            return incoming
+        return self.smartmedia_library_root
+
+    def default_pattern_save_dir(self) -> Path:
+        preferred = Path("/Volumes/BOSS DATA")
+        if preferred.exists():
+            return preferred
+        outgoing = self.get_library_paths()["outgoing"]
+        if outgoing.exists():
+            return outgoing
+        return self.smartmedia_library_root
+
+
+class SmartMediaLibraryWindow:
+    """SmartMedia Library — the application's true root window."""
+
+    def __init__(self, root, state: 'AppState'):
         self.root = root
-        self.debug_mode = debug_mode
-        self.root.title("Dr. Sidekick by One Coin One Play")
-        self.root.withdraw()  # Hidden until user opens Pattern Manager
+        self.state = state
+        self.root.title("Dr. Sidekick — SmartMedia Library")
+        self.root.geometry("1200x720")
+        self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
-        # Calculate window height: toolbar (~40) + ruler (25) + 32 lanes + statusbar (~25) + padding
-        window_height = 40 + 25 + (32 * 25) + 25 + 30  # ~920 pixels
-        self.root.geometry(f"1200x{window_height}")
+        self._setup_styles()
 
-        # Set dark theme colors
+        self._editor: Optional['PatternManagerWindow'] = None
+        self._editor_win: Optional[tk.Toplevel] = None
+
+        self._build_ui()
+
+    # ── Styles ───────────────────────────────────────────────────────────
+
+    def _setup_styles(self):
+        """Configure global ttk dark-theme styles."""
         style = ttk.Style()
         style.theme_use('clam')
         self.root.configure(bg="#000000")
-
-        # Global white-on-black styling for ttk widgets/windows.
         style.configure(".", background="#000000", foreground="#ffffff")
         style.configure("TFrame", background="#000000")
         style.configure("TLabel", background="#000000", foreground="#ffffff")
@@ -3582,15 +3914,937 @@ class SP303PatternEditor:
         )
         style.configure("Toolbar.TSpinbox", fieldbackground="#000000", foreground="#ffffff", font=("", 10, "bold"))
 
+
+    # ── Library menu bar ─────────────────────────────────────────────────
+
+    def _create_menu(self, *, open_card, backup_card, new_card, delete_card,
+                     save_current_card, restore_to_card, open_in_manager,
+                     create_virtual_card_from_physical):
+        """Build and attach the library window menu bar."""
+        menubar = tk.Menu(self.root)
+        self.root.config(menu=menubar)
+
+        # File
+        file_menu = tk.Menu(menubar, tearoff=0)
+        menubar.add_cascade(label="File", menu=file_menu)
+        file_menu.add_command(label="Open Pattern Manager",
+                              command=self.open_pattern_manager, accelerator="Ctrl+Shift+L")
+        file_menu.add_separator()
+        file_menu.add_command(label="Exit", command=self._on_close)
+
+        # Card
+        card_menu = tk.Menu(menubar, tearoff=0)
+        menubar.add_cascade(label="Card", menu=card_menu)
+        card_menu.add_command(label="Open Card...", command=open_card)
+        card_menu.add_command(label="Backup Card", command=backup_card)
+        card_menu.add_separator()
+        card_menu.add_command(label="New Card...", command=new_card)
+        card_menu.add_command(label="Delete Card", command=delete_card)
+        card_menu.add_separator()
+        card_menu.add_command(label="Save Card Changes", command=save_current_card)
+        card_menu.add_command(label="Restore to Card", command=restore_to_card)
+        card_menu.add_command(label="Open in Sample Manager", command=open_in_manager)
+        card_menu.add_separator()
+        card_menu.add_command(label="Create Virtual Card from Physical",
+                              command=create_virtual_card_from_physical)
+
+        # Help
+        help_menu = tk.Menu(menubar, tearoff=0)
+        menubar.add_cascade(label="Help", menu=help_menu)
+        help_menu.add_command(label="Quick Start", command=self.on_help_quick_start)
+        help_menu.add_command(label="Workflow Examples", command=self.on_help_workflow_examples)
+        help_menu.add_command(label="FAQ / Troubleshooting", command=self.on_help_faq)
+        help_menu.add_separator()
+        help_menu.add_command(label="Check for Update...", command=self.on_check_for_update)
+        help_menu.add_command(label="About", command=self.on_about)
+        help_menu.add_separator()
+        help_menu.add_command(label="View Session Log...", command=self.on_view_log)
+
+        # Keyboard shortcuts
+        self.root.bind("<Control-Shift-L>", lambda e: self.open_pattern_manager())
+        self.root.bind("<Control-Shift-l>", lambda e: self.open_pattern_manager())
+
+    # ── Pattern Manager ──────────────────────────────────────────────────
+
+    def _open_sample_manager(self, smpinfo_path=None):
+        """Open the Sample Manager dialog parented to the Library window."""
+        state = self.state
+        root = self.root
+
+        class _Adapter:
+            def update_status(self, msg): pass
+            def set_loaded_card_context(self, ctx): pass
+            def ask_output_directory(self, initialdir=None):
+                kwargs = {"title": "Select Output Directory"}
+                if initialdir is not None:
+                    kwargs["initialdir"] = str(initialdir)
+                result = filedialog.askdirectory(**kwargs)
+                return Path(result) if result else None
+
+        adapter = _Adapter()
+        adapter.root = root
+        adapter.state = state
+        PatternManagerWindow.on_sample_manager(adapter, smpinfo_path=smpinfo_path)
+
+    def open_pattern_manager(self) -> 'PatternManagerWindow':
+        """Show the Pattern Manager window, creating it if needed."""
+        if self._editor is None:
+            self._editor_win = tk.Toplevel(self.root)
+            debug_mode = "--debug" in sys.argv[1:]
+            self._editor = PatternManagerWindow(self._editor_win, self.state, self, debug_mode=debug_mode)
+        else:
+            self._editor_win.deiconify()
+        self._editor_win.lift()
+        return self._editor
+
+    def _on_close(self):
+        """Quit the application."""
+        self.root.destroy()
+
+    # ── Library UI ───────────────────────────────────────────────────────
+
+    def on_help_quick_start(self):
+        """Show quick-start guide for beta users."""
+        quick_start = """Dr. Sidekick — Quick Start
+
+Welcome! Here's everything you need to get going.
+
+
+THE SMARTMEDIA LIBRARY — Your starting point
+─────────────────────────────────────────────
+Dr. Sidekick opens with the SmartMedia Library. This is your personal library
+of virtual SP-303 cards — one card per project, kit, or physical card.
+
+Virtual cards are the heart of the workflow. They let you:
+
+  • Back up your physical card — Card -> Backup Card preserves everything
+    (patterns + samples) before you make any changes.
+
+  • Build a project library — create as many virtual cards as you like, each
+    with its own name, samples and patterns. Your work is never stuck on one
+    physical card.
+
+  • Restore to your physical card — when a virtual card is ready to perform,
+    Card -> Restore to Card writes it straight back to the SP-303.
+
+  • Import a physical card — Card -> Create Virtual Card from Physical reads
+    a mounted SP-303 card and brings it into the library.
+
+From the library you can branch into two main areas:
+
+
+WORK ON PATTERNS
+─────────────────────────────────────────────
+Open the Pattern Manager: File -> Open Pattern Manager (or Ctrl+Shift+L).
+
+  • Select a pattern slot (C1–D8), switch to Draw mode, and click the pad
+    rows to place hits. Drag to move them, right-click to delete.
+    Set bar length with the Pattern Length spinner.
+    Adjust velocity by selecting notes and using the [ / ] keys.
+    Save with Ctrl+S.
+
+  • Import a MIDI file: Patterns -> Import MIDI File...
+
+  • Apply a groove: Patterns -> Add Groove Pattern...
+
+  • Copy or exchange patterns between slots:
+    Edit -> Copy Pattern / Paste Pattern, or Patterns -> Exchange Patterns...
+
+
+WORK ON SAMPLES
+─────────────────────────────────────────────
+All sample tools are in the Pattern Manager under the Samples menu.
+
+  • Quick Import WAV Folder — point at a folder of WAVs. Dr. Sidekick
+    converts and prepares everything in BOSS DATA_OUTGOING, ready to copy
+    to the SP-303. More than 8 files? They split into BANK_LOAD_01,
+    BANK_LOAD_02 etc. — load one bank at a time on the device.
+
+  • Sample Manager — view and reassign which sample lives on which pad.
+    Load a card setup, edit the table, then Write Changes to Card.
+
+  • Convert MPC1000 Program (.pgm) — select a .pgm file and Dr. Sidekick
+    maps all 64 pads to SP-303 banks, creates a new virtual card named
+    after the program, and prepares BANK_LOAD folders for the device.
+
+
+First time? Back up before you touch anything.
+   Card -> Backup Card, then explore. If anything goes wrong,
+   Card -> Restore to Card gets you back to where you started.
+"""
+        show_text_dialog(self.root, "Quick Start", quick_start, geometry="980x700")
+
+    def on_help_workflow_examples(self):
+        """Show real-world workflow examples."""
+        examples = """WORKFLOW EXAMPLES
+
+
+─────────────────────────────────────────────────────────────
+Example 1: Load a Kit and Program a Pattern from Scratch
+─────────────────────────────────────────────────────────────
+
+Goal: Get your own samples onto the SP-303 and program a beat
+      ready to play back on the hardware.
+
+Step 1 — Open the Pattern Manager.
+  In the SmartMedia Library window: File -> Open Pattern Manager (Ctrl+Shift+L).
+
+Step 2 — Load your samples onto the card.
+  Samples -> Quick Import WAV Folder -> select your kit folder.
+  Files are prepared in SmartMedia-Library/Cards/BOSS DATA_OUTGOING.
+  If more than 8 WAVs, load BANK_LOAD_01 first, then BANK_LOAD_02
+  on the device. Samples land on pads A1–D8 in file order.
+
+Step 3 — Program the pattern.
+  Select a pattern slot (C1–D8). Switch to Draw mode.
+  Click pad rows to place hits. Drag to move. Right-click to delete.
+  Set bar length with the Pattern Length spinner.
+  Adjust velocity by selecting notes and using [ / ] keys.
+
+  Alternatively, import your own MIDI file:
+  Patterns -> Import MIDI File... -> select your file.
+  Review events in the editor and adjust as needed.
+
+  Optionally apply a groove:
+  Patterns -> Add Groove Pattern... -> select your groove file.
+
+Step 4 — Save and load onto the SP-303.
+  File -> Save (Ctrl+S).
+  Copy the PTNINFO0.SP0 and PTNDATA0.SP0 files to your card.
+  Eject safely, insert into SP-303, and play.
+
+Note: A library of example MIDI patterns and grooves is planned for a future release.
+
+
+─────────────────────────────────────────────────────────────
+Example 2: Convert an MPC1000 Kit to SP-303
+─────────────────────────────────────────────────────────────
+
+Goal: Bring an MPC1000 drum program straight onto the SP-303,
+      preserving the original pad layout as closely as possible.
+
+Step 1 — Open the Pattern Manager, then go to
+  Samples -> Convert MPC1000 Program (.pgm).
+  Select the .pgm file. If the WAV samples are in the same folder
+  (or a subfolder), no further prompt appears.
+  If WAVs live elsewhere, a folder picker opens.
+
+Step 2 — Review the results dialog.
+  Each bank (A–H) shows which WAV landed on which SMPL slot.
+  NOT FOUND entries mean the .pgm referenced a sample name that
+  wasn't matched in the WAV folder — check spelling or relocate.
+
+Step 3 — Load onto the SP-303.
+  Open SmartMedia-Library/Cards/<pgm name> in Finder.
+  Copy BANK_LOAD_01 contents (SMPL0001–SMPL0008.WAV) to your card.
+  On the SP-303 select the target bank and run Import.
+  Repeat for each BANK_LOAD folder.
+
+Note: Each .pgm gets its own card named after the program file.
+  Re-running with the same .pgm overwrites that card only.
+
+
+─────────────────────────────────────────────────────────────
+Example 3: Reorganize a Card Without Losing Anything
+─────────────────────────────────────────────────────────────
+
+Goal: Safely reassign pads and shuffle patterns on an existing card.
+
+Step 1 — Back up first.
+  In the SmartMedia Library window: Card -> Backup Card.
+  A backup is created in Backup/ next to SmartMedia-Library.
+
+Step 2 — Load the current card setup.
+  In the Pattern Manager: Samples -> Sample Manager -> Load Card Setup.
+  All current pad assignments appear in the table.
+
+Step 3 — Reassign pads.
+  Select a pad row, then use Assign WAV/SP0 to swap samples.
+  The status bar confirms every change.
+
+Step 4 — Remap or exchange patterns.
+  In the Pattern Manager use Edit -> Copy Pattern / Paste Pattern
+  to move patterns between slots without re-programming.
+
+Step 5 — Write changes.
+  In Sample Manager: Write Changes to Card.
+  Eject safely and verify on device.
+  If anything is wrong: SmartMedia Library -> Card -> Restore to Card.
+
+
+─────────────────────────────────────────────────────────────
+Example 4: Build and Refine a Sample Kit
+─────────────────────────────────────────────────────────────
+
+Goal: Load a folder of WAVs onto the SP-303, then fine-tune
+      which sample sits on which pad before committing to the card.
+
+Step 1 — Back up your current card first.
+  In the SmartMedia Library window: Card -> Backup Card.
+  A backup is stored in Backup/ next to SmartMedia-Library.
+
+Step 2 — Quick Import your WAVs.
+  In the Pattern Manager: Samples -> Quick Import WAV Folder.
+  Select your kit folder. Dr. Sidekick converts and prepares
+  the files in SmartMedia-Library/Cards/BOSS DATA_OUTGOING.
+  If there are more than 8 WAVs they split into BANK_LOAD_01,
+  BANK_LOAD_02 etc. — load one bank at a time on the device.
+  Samples are assigned to pads in file order (A1 upwards).
+
+Step 3 — Review and reassign pads.
+  Samples -> Sample Manager -> Load Card Setup.
+  The table shows every pad and its current assignment.
+  To move a sample: select its row, click Assign WAV/SP0,
+  and pick the replacement file. Repeat for any pad you want
+  to change. The status bar confirms each reassignment.
+
+Step 4 — Write to card.
+  Click Write Changes to Card in the Sample Manager.
+  Copy the output files to your physical SP-303 card.
+  Eject safely, insert into SP-303, and verify on device.
+
+Step 5 — Iterate.
+  Not happy with the layout? Go back to Step 3 — the virtual
+  card in the library holds your work between sessions.
+  When you're satisfied, Card -> Backup Card again to save
+  the final state before loading it onto the hardware.
+"""
+        show_text_dialog(self.root, "Workflow Examples", examples, geometry="980x700")
+
+    def on_help_faq(self):
+        """Show FAQ and troubleshooting notes for beta users."""
+        faq = """FAQ / Troubleshooting (Beta)
+
+Q: Where do I start — the SmartMedia Library or the Pattern Manager?
+A: The SmartMedia Library window opens first and is always present. Use it to
+   manage your virtual cards. Open the Pattern Manager from File -> Open Pattern
+   Manager (or Ctrl+Shift+L) when you need to edit patterns or work with samples.
+
+Q: I selected a single WAV file in Quick Import. Is that valid?
+A: Yes. The app uses that file's parent folder automatically.
+
+Q: Why do I get BANK_LOAD_01 folders?
+A: More than 8 WAV files were found. SP-303 loads one bank (8 samples) at a time.
+
+Q: Where are Quick Import files written?
+A: SmartMedia-Library/Cards/BOSS DATA_OUTGOING (or /Volumes/BOSS DATA if your
+   physical card is mounted and write-to-card is enabled).
+
+Q: Existing WAVs disappeared from BOSS DATA_OUTGOING.
+A: They are archived into the subfolder wav_archive_YYYYMMDD_HHMMSS before
+   each Quick Import run.
+
+Q: Write Changes completed, but the device did not reflect changes.
+A: Most common causes:
+   - Card not ejected safely before inserting into SP-303.
+   - Wrong output path: check SmartMedia-Library/Cards/BOSS DATA_OUTGOING or
+     confirm write-to-card is enabled if targeting a mounted physical card.
+
+Q: How do I back up and restore a card?
+A: In the SmartMedia Library window, select the card and use Card -> Backup Card.
+   Backups are stored in Backup/ next to SmartMedia-Library. To restore, use
+   Card -> Restore to Card.
+
+Q: I used Convert MPC1000 Program and some pads say NOT FOUND.
+A: The .pgm stores sample names without file extensions, and matching is
+   done by filename stem. Check that your WAV filenames match the names
+   stored in the .pgm (case-insensitive partial matches are tried too).
+   If WAVs are in a different folder, re-run and point to the correct folder
+   when the folder picker appears.
+
+Q: Convert MPC1000 Program only shows a few banks — where are the rest?
+A: Only banks that contain at least one matched sample are written.
+   Empty banks are skipped. Pads with no assignment or unresolved samples
+   are listed per-slot in the results dialog.
+
+Q: I ran Convert MPC1000 twice with different programs and both are there.
+A: Correct — each .pgm gets its own card named after the program file.
+   Re-running with the same .pgm overwrites that card only.
+
+Q: How do I import my physical SP-303 card into the library?
+A: In the SmartMedia Library window: Card -> Create Virtual Card from Physical.
+   This copies the SP0 files from the mounted card into a new virtual card entry.
+
+"""
+        show_text_dialog(self.root, "FAQ / Troubleshooting", faq, geometry="1024x680")
+
+    def on_check_for_update(self):
+        """Check GitHub for the latest release."""
+        api_url = "https://api.github.com/repos/OneCoinOnePlay/dr-sidekick/releases/latest"
+        current_version = APP_VERSION
+
+        def parse_version(raw: str) -> Tuple[int, ...]:
+            raw = raw.strip().lstrip("vV")
+            parts: List[int] = []
+            for token in raw.split("."):
+                digits = "".join(ch for ch in token if ch.isdigit())
+                if not digits:
+                    break
+                parts.append(int(digits))
+            return tuple(parts) if parts else (0,)
+
+        def show_result(title: str, msg: str):
+            self.root.after(0, lambda: messagebox.showinfo(title, msg))
+
+        def do_check():
+            try:
+                req = urllib.request.Request(
+                    api_url,
+                    headers={
+                        "Accept": "application/vnd.github+json",
+                        "User-Agent": "Dr-Sidekick-Update-Check",
+                    },
+                )
+                with urllib.request.urlopen(req, timeout=6) as response:
+                    payload = json.loads(response.read().decode("utf-8"))
+
+                latest_tag = str(payload.get("tag_name", "")).strip()
+                latest_name = str(payload.get("name", "")).strip()
+                latest_version_label = latest_tag or latest_name or "unknown"
+                release_url = str(payload.get("html_url", "https://github.com/OneCoinOnePlay/dr-sidekick/releases"))
+
+                if parse_version(latest_version_label) > parse_version(current_version):
+                    show_result(
+                        "Update Available",
+                        f"Current version: {current_version}\n"
+                        f"Latest version: {latest_version_label}\n\n"
+                        f"Download:\n{release_url}",
+                    )
+                else:
+                    show_result(
+                        "Up To Date",
+                        f"Dr. Sidekick is up to date.\n\nCurrent version: {current_version}",
+                    )
+            except (urllib.error.URLError, TimeoutError, ValueError, json.JSONDecodeError):
+                show_result(
+                    "Check for Update",
+                    "Unable to check updates right now.\n\n"
+                    f"Current version: {current_version}\n"
+                    "Manual check:\nhttps://github.com/OneCoinOnePlay/dr-sidekick/releases",
+                )
+
+        threading.Thread(target=do_check, daemon=True).start()
+
+    def on_view_log(self):
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Session Log")
+        dialog.geometry("900x540")
+        dialog.transient(self.root)
+        dialog.configure(bg="#000000")
+
+        frame = ttk.Frame(dialog, padding=10)
+        frame.pack(fill=tk.BOTH, expand=True)
+
+        text = tk.Text(
+            frame, wrap=tk.NONE, bg="#000000", fg="#cccccc",
+            insertbackground="#ffffff", relief=tk.FLAT, highlightthickness=0,
+            font=("Courier", 10),
+        )
+        scroll_y = ttk.Scrollbar(frame, orient=tk.VERTICAL, command=text.yview)
+        scroll_x = ttk.Scrollbar(frame, orient=tk.HORIZONTAL, command=text.xview)
+        text.configure(yscrollcommand=scroll_y.set, xscrollcommand=scroll_x.set)
+        scroll_y.pack(side=tk.RIGHT, fill=tk.Y)
+        scroll_x.pack(side=tk.BOTTOM, fill=tk.X)
+        text.pack(fill=tk.BOTH, expand=True)
+
+        try:
+            content = _LOG_PATH.read_text(encoding="utf-8") if _LOG_PATH.exists() else "(no log file yet)"
+        except Exception as exc:
+            content = f"(could not read log: {exc})"
+
+        text.insert("1.0", content)
+        text.configure(state=tk.DISABLED)
+        text.see(tk.END)
+
+        bottom = ttk.Frame(frame)
+        bottom.pack(fill=tk.X, pady=(6, 0))
+        ttk.Label(bottom, text=str(_LOG_PATH), font=("Courier", 9)).pack(side=tk.LEFT)
+
+        def clear_log():
+            if not messagebox.askyesno("Clear Log", "Clear the session log file?", parent=dialog):
+                return
+            try:
+                _LOG_PATH.write_text("", encoding="utf-8")
+            except Exception as exc:
+                messagebox.showerror("Clear Log", str(exc), parent=dialog)
+                return
+            log.info("Session log cleared by user.")
+            try:
+                new_content = _LOG_PATH.read_text(encoding="utf-8")
+            except Exception:
+                new_content = ""
+            text.configure(state=tk.NORMAL)
+            text.delete("1.0", tk.END)
+            text.insert("1.0", new_content)
+            text.configure(state=tk.DISABLED)
+            text.see(tk.END)
+
+        ttk.Button(bottom, text="Clear Log", command=clear_log).pack(side=tk.RIGHT)
+
+    def on_about(self):
+        """Show about dialog"""
+        about = tk.Toplevel(self.root)
+        about.title("About Dr. Sidekick")
+        about.geometry("620x340")
+        about.resizable(False, False)
+        about.transient(self.root)
+        about.grab_set()
+        about.configure(bg="#000000")
+
+        container = tk.Frame(about, bg="#000000", padx=16, pady=16)
+        container.pack(fill=tk.BOTH, expand=True)
+
+        tk.Label(
+            container,
+            text=f"Dr. Sidekick v{APP_VERSION}",
+            font=("", 14, "bold"),
+            bg="#000000",
+            fg="#ffffff",
+            anchor="w",
+            justify=tk.LEFT,
+        ).pack(anchor=tk.W)
+
+        tk.Label(
+            container,
+            text="Standalone graphical pattern editor and SmartMedia librarian for the BOSS Dr. Sample SP-303",
+            wraplength=580,
+            justify=tk.LEFT,
+            bg="#000000",
+            fg="#ffffff",
+            anchor="w",
+        ).pack(anchor=tk.W, pady=(8, 10))
+
+        contacts = (
+            "Author: One Coin One Play\n\n"
+            "github.com/OneCoinOnePlay\n"
+            "soundcloud.com/one_coin_one_play\n"
+            "instagram.com/one_coin_one_play\n"
+            "linkedin.com/in/onecoinoneplay\n"
+            "x.com/OneCoinOnePlay\n"
+            "youtube.com/@1coin1play"
+        )
+        tk.Label(
+            container,
+            text=contacts,
+            justify=tk.LEFT,
+            bg="#000000",
+            fg="#ffffff",
+            anchor="w",
+        ).pack(anchor=tk.W, pady=(0, 14))
+
+        tk.Label(
+            container,
+            text="Disclaimer: Dr. Sidekick is an independent community project and is not affiliated with, endorsed by, or supported by Roland Corporation or BOSS.",
+            wraplength=580,
+            justify=tk.LEFT,
+            bg="#000000",
+            fg="#cccccc",
+            anchor="w",
+        ).pack(anchor=tk.W)
+
+    def _build_ui(self):
+        """Build the library window UI directly into the root window."""
+        self.state.smartmedia_lib.ensure_dirs()
+
+        frame = ttk.Frame(self.root, padding=10)
+        frame.pack(fill=tk.BOTH, expand=True)
+
+        # ── Branding header ─────────────────────────────────────────────────
+        header_frame = ttk.Frame(frame)
+        header_frame.pack(fill=tk.X, pady=(0, 6))
+        ttk.Label(header_frame, text="Dr. Sidekick", font=("Courier", 18, "bold")).pack(side=tk.LEFT)
+        ttk.Label(header_frame, text="Pattern editor and SmartMedia librarian for the Boss Dr. Sample SP-303.",
+                  font=("Courier", 9)).pack(side=tk.LEFT, padx=(12, 0), anchor=tk.S, pady=(0, 3))
+        ttk.Button(header_frame, text="Open Pattern Manager",
+                   command=self.open_pattern_manager).pack(side=tk.RIGHT)
+        ttk.Button(header_frame, text="Open Sample Manager",
+                   command=self._open_sample_manager).pack(side=tk.RIGHT, padx=(0, 6))
+
+        # ── Top status bar ──────────────────────────────────────────────────
+        top_bar = ttk.Frame(frame)
+        top_bar.pack(fill=tk.X, pady=(0, 8))
+
+        card_status_var = tk.StringVar(value="Checking physical card...")
+        card_status_lbl = ttk.Label(top_bar, textvariable=card_status_var, font=("Courier", 10))
+        card_status_lbl.pack(side=tk.LEFT)
+
+        write_to_card_var = tk.BooleanVar(value=self.state.config.get("write_to_card", True))
+        def on_write_toggle():
+            self.state.config["write_to_card"] = write_to_card_var.get()
+            self.state.save_config()
+        ttk.Checkbutton(top_bar, text="Write to Card", variable=write_to_card_var,
+                        command=on_write_toggle).pack(side=tk.RIGHT)
+
+        open_card_status_var = tk.StringVar(value="No card open")
+        ttk.Label(top_bar, textvariable=open_card_status_var, font=("Courier", 10)).pack(side=tk.RIGHT, padx=(0, 16))
+
+        def refresh_card_status():
+            preferred = Path("/Volumes/BOSS DATA")
+            if preferred.exists():
+                card_status_var.set(f"● BOSS DATA mounted: {preferred}")
+            else:
+                card_status_var.set("○ No physical card mounted")
+            self.root.after(2000, refresh_card_status)
+        refresh_card_status()
+
+        auto_backup_var = tk.BooleanVar(value=self.state.config.get("auto_backup_on_open", False))
+        def on_auto_backup_toggle():
+            self.state.config["auto_backup_on_open"] = auto_backup_var.get()
+            self.state.save_config()
+
+        def open_card():
+            preferred = Path("/Volumes/BOSS DATA") / "SMPINFO0.SP0"
+            if preferred.exists():
+                path = preferred
+            else:
+                chosen = filedialog.askopenfilename(
+                    parent=self.root,
+                    title="Select SMPINFO0.SP0",
+                    initialdir=str(self.state.default_card_mount_dir()),
+                    filetypes=[("SMPINFO0.SP0", "SMPINFO0.SP0"), ("SP0 Files", "*.SP0"), ("All Files", "*.*")],
+                )
+                if not chosen:
+                    return
+                path = Path(chosen)
+            active_smpinfo[0] = path
+            open_card_status_var.set(f"Open: {path.parent.name}")
+            if auto_backup_var.get():
+                try:
+                    source = path.parent
+                    dest = self.state.smartmedia_lib.backup_dir / source.name
+                    dest.mkdir(parents=True, exist_ok=True)
+                    for f in sorted(source.glob("*.SP0")):
+                        shutil.copy(f, dest / f.name)
+                except Exception:
+                    pass
+
+        def backup_card():
+            card_dir = Path("/Volumes/BOSS DATA")
+            if not card_dir.exists():
+                if active_smpinfo[0] is not None:
+                    card_dir = active_smpinfo[0].parent
+                else:
+                    messagebox.showwarning("Backup Card", "No physical card mounted or open.", parent=self.root)
+                    return
+            sp0_files = sorted(card_dir.glob("*.SP0"))
+            if not sp0_files:
+                messagebox.showwarning("Backup Card", "No .SP0 files found on card.", parent=self.root)
+                return
+            try:
+                dest = self.state.smartmedia_lib.backup_dir / card_dir.name
+                dest.mkdir(parents=True, exist_ok=True)
+                for f in sp0_files:
+                    shutil.copy(f, dest / f.name)
+                messagebox.showinfo("Backup Card", f"Backed up {len(sp0_files)} file(s) to Backup/{card_dir.name}/", parent=self.root)
+            except Exception as exc:
+                messagebox.showerror("Backup Card", str(exc), parent=self.root)
+
+        ttk.Button(top_bar, text="Open Card", command=open_card).pack(side=tk.LEFT, padx=(12, 0))
+        ttk.Button(top_bar, text="Create Virtual Card", command=lambda: create_virtual_card_from_physical()).pack(side=tk.LEFT, padx=(6, 0))
+        ttk.Button(top_bar, text="Backup Card", command=backup_card).pack(side=tk.LEFT, padx=(6, 0))
+        ttk.Checkbutton(top_bar, text="Auto-backup on Open", variable=auto_backup_var,
+                        command=on_auto_backup_toggle).pack(side=tk.LEFT, padx=(12, 0))
+
+        # ── Main two-panel layout ────────────────────────────────────────────
+        paned = ttk.PanedWindow(frame, orient=tk.HORIZONTAL)
+        paned.pack(fill=tk.BOTH, expand=True)
+
+        # ── Left panel: card browser ─────────────────────────────────────────
+        left_frame = ttk.Frame(paned, padding=4)
+        paned.add(left_frame, weight=1)
+
+        ttk.Label(left_frame, text="VIRTUAL CARDS", font=("Courier", 11, "bold")).pack(anchor=tk.W, pady=(0, 4))
+
+        filter_row = ttk.Frame(left_frame)
+        filter_row.pack(fill=tk.X, pady=(0, 4))
+        search_var = tk.StringVar()
+        search_entry = ttk.Entry(filter_row, textvariable=search_var)
+        search_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 4))
+
+        card_tree_cols = ("name", "author", "ptn")
+        style = ttk.Style(self.root)
+        style.configure("Library.Treeview", background="#000000", fieldbackground="#000000",
+                        foreground="#ffffff", rowheight=22)
+        style.map("Library.Treeview", background=[("selected", "#2a7fff")],
+                  foreground=[("selected", "#ffffff")])
+        card_tree = ttk.Treeview(left_frame, columns=card_tree_cols, show="headings",
+                                 height=20, style="Library.Treeview")
+        card_tree.heading("name", text="Name")
+        card_tree.heading("author", text="Author")
+        card_tree.heading("ptn", text="PTN")
+        card_tree.column("name", width=160)
+        card_tree.column("author", width=120)
+        card_tree.column("ptn", width=40, anchor=tk.CENTER)
+        card_tree.tag_configure("active", background="#2a7fff", foreground="#ffffff")
+        card_tree.pack(fill=tk.BOTH, expand=True)
+
+        left_btn_row = ttk.Frame(left_frame)
+        left_btn_row.pack(fill=tk.X, pady=(6, 0))
+
+        # ── Right panel: card detail ─────────────────────────────────────────
+        right_frame = ttk.Frame(paned, padding=4)
+        paned.add(right_frame, weight=2)
+
+        detail_title = ttk.Label(right_frame, text="CARD DETAIL", font=("Courier", 11, "bold"))
+        detail_title.pack(anchor=tk.W, pady=(0, 6))
+
+        # Card detail fields
+        detail_frame = ttk.Frame(right_frame)
+        detail_frame.pack(fill=tk.X)
+
+        def make_field(parent, label, row):
+            ttk.Label(parent, text=label, width=12, anchor=tk.E).grid(row=row, column=0, sticky=tk.E, padx=(0, 6), pady=2)
+            var = tk.StringVar()
+            entry = ttk.Entry(parent, textvariable=var)
+            entry.grid(row=row, column=1, sticky=tk.EW, pady=2)
+            parent.columnconfigure(1, weight=1)
+            return var, entry
+
+        name_var, name_entry = make_field(detail_frame, "Name:", 0)
+        author_var, author_entry = make_field(detail_frame, "Author:", 1)
+        categories_var, categories_entry = make_field(detail_frame, "Categories:", 2)
+        tags_var, tags_entry = make_field(detail_frame, "Tags:", 3)
+
+        wp_var = tk.BooleanVar(value=False)
+        wp_btn = ttk.Checkbutton(detail_frame, text="Write Protect", variable=wp_var)
+        wp_btn.grid(row=4, column=1, sticky=tk.W, pady=4)
+
+        # Pre-fill author from last used
+        author_var.set(self.state.config.get("last_author", ""))
+
+        # Pad notes
+        pad_notes_frame = ttk.LabelFrame(right_frame, text="PAD NOTES", padding=4)
+        pad_notes_frame.pack(fill=tk.X, pady=(8, 0))
+
+        pad_note_vars: Dict[str, tk.StringVar] = {}
+        for i, pad in enumerate(SP303_PADS):
+            col = i % 8
+            base_row = (i // 8) * 2
+            ttk.Label(pad_notes_frame, text=pad, anchor=tk.CENTER, width=6).grid(
+                row=base_row, column=col, padx=2, sticky=tk.EW)
+            var = tk.StringVar()
+            ttk.Entry(pad_notes_frame, textvariable=var, width=8).grid(
+                row=base_row + 1, column=col, padx=2, pady=(0, 4), sticky=tk.EW)
+            pad_note_vars[pad] = var
+            pad_notes_frame.columnconfigure(col, weight=1)
+
+        detail_btn_row = ttk.Frame(right_frame)
+        detail_btn_row.pack(fill=tk.X, pady=(6, 0))
+
+        # ── State ─────────────────────────────────────────────────────────────
+        current_card: list = [None]
+        active_smpinfo: list = [None]
+
+        def get_all_cards():
+            query = search_var.get().strip().lower()
+            cards = self.state.smartmedia_lib.list_cards()
+            if query:
+                cards = [c for c in cards if query in c.name.lower() or query in c.author.lower()
+                         or any(query in cat.lower() for cat in c.categories)]
+            return cards
+
+        def refresh_card_list():
+            active_name = current_card[0].name if current_card[0] else None
+            existing = set(card_tree.get_children())
+            seen = set()
+            for card in get_all_cards():
+                if card.name in seen:
+                    continue  # skip duplicate names (two dirs with same name in card.json)
+                seen.add(card.name)
+                tag = ("active",) if card.name == active_name else ()
+                ptn_dot = "●" if self.state.smartmedia_lib.card_has_patterns(card.name) else "○"
+                if card_tree.exists(card.name):
+                    card_tree.item(card.name, values=(card.name, card.author, ptn_dot), tags=tag)
+                else:
+                    card_tree.insert("", tk.END, iid=card.name, values=(card.name, card.author, ptn_dot), tags=tag)
+            for stale in existing - seen:
+                card_tree.delete(stale)
+
+        def on_card_select(event=None):
+            sel = card_tree.selection()
+            for item in card_tree.get_children():
+                card_tree.item(item, tags=())
+            if not sel:
+                current_card[0] = None
+                return
+            card_tree.item(sel[0], tags=("active",))
+            card = self.state.smartmedia_lib.get_card(sel[0])
+            if card is None:
+                return
+            current_card[0] = card
+            name_var.set(card.name)
+            author_var.set(card.author)
+            categories_var.set(", ".join(card.categories))
+            tags_var.set(", ".join(card.tags))
+            wp_var.set(card.write_protect)
+            for pad, var in pad_note_vars.items():
+                var.set(card.pad_notes.get(pad, ""))
+
+        card_tree.bind("<<TreeviewSelect>>", on_card_select)
+        search_var.trace_add("write", lambda *_: refresh_card_list())
+
+        def save_current_card():
+            card = current_card[0]
+            if card is None:
+                return
+            new_name = name_var.get().strip()
+            if new_name != card.name:
+                try:
+                    self.state.smartmedia_lib.rename_card(card, new_name)
+                except ValueError as exc:
+                    messagebox.showerror("Rename Card", str(exc), parent=self.root)
+                    return
+            card.author = author_var.get().strip()
+            card.categories = [c.strip() for c in categories_var.get().split(",") if c.strip()]
+            card.tags = [t.strip() for t in tags_var.get().split(",") if t.strip()]
+            card.pad_notes = {pad: var.get().strip() for pad, var in pad_note_vars.items() if var.get().strip()}
+            card.write_protect = wp_var.get()
+            if card.author:
+                self.state.config["last_author"] = card.author
+                self.state.save_config()
+            self.state.smartmedia_lib.save_card(card)
+            refresh_card_list()
+
+        def new_card():
+            new_name = simpledialog.askstring("New Virtual Card", "Card name:", parent=self.root)
+            if not new_name or not new_name.strip():
+                return
+            new_name = new_name.strip()
+            if self.state.smartmedia_lib.get_card(new_name):
+                messagebox.showwarning("New Card", f"A card named '{new_name}' already exists.", parent=self.root)
+                return
+            card = VirtualCard(name=new_name)
+            self.state.smartmedia_lib.create_card(card)
+            refresh_card_list()
+            card_tree.selection_set(new_name)
+            on_card_select()
+
+        def delete_card():
+            card = current_card[0]
+            if card is None:
+                messagebox.showinfo("Delete Card", "Select a card first.", parent=self.root)
+                return
+            if card.write_protect:
+                messagebox.showwarning("Delete Card", "Card is write-protected.", parent=self.root)
+                return
+            if messagebox.askyesno("Delete Card", f"Delete '{card.name}'? This cannot be undone.", parent=self.root):
+                self.state.smartmedia_lib.delete_card(card.name)
+                current_card[0] = None
+                refresh_card_list()
+
+        def restore_to_card():
+            card = current_card[0]
+            if card is None:
+                messagebox.showinfo("Restore to Card", "Select a virtual card first.", parent=self.root)
+                return
+            sp0_files = list((self.state.smartmedia_lib.cards_dir / card.name).glob("*.SP0"))
+            if not sp0_files:
+                messagebox.showwarning("Restore to Card", f"'{card.name}' has no SP0 files to restore.", parent=self.root)
+                return
+            preferred = Path("/Volumes/BOSS DATA")
+            target = preferred if preferred.exists() else self.state.get_library_paths()["outgoing"]
+            if not messagebox.askyesno("Restore to Card",
+                                       f"Restore '{card.name}' to:\n{target}\n\nThis will overwrite files. Continue?",
+                                       parent=self.root):
+                return
+            try:
+                self.state.smartmedia_lib.restore_card(card.name, target)
+                messagebox.showinfo("Restore to Card", f"Restored to {target}", parent=self.root)
+            except Exception as exc:
+                messagebox.showerror("Restore to Card", str(exc), parent=self.root)
+
+        def open_in_manager():
+            smpinfo = active_smpinfo[0]
+            if smpinfo is None and current_card[0] is not None:
+                candidate = self.state.smartmedia_lib.cards_dir / current_card[0].name / "SMPINFO0.SP0"
+                if candidate.exists():
+                    smpinfo = candidate
+            if smpinfo is None:
+                messagebox.showinfo(
+                    "Sample Manager",
+                    "Select a virtual card or open a physical card first.",
+                    parent=self.root,
+                )
+                return
+            self._open_sample_manager(smpinfo_path=smpinfo)
+
+        def create_virtual_card_from_physical():
+            if active_smpinfo[0] is None:
+                messagebox.showinfo(
+                    "Create Virtual Card",
+                    "Open a physical card first using the Open Card button.",
+                    parent=self.root,
+                )
+                return
+            source_dir = active_smpinfo[0].parent
+            suggested = source_dir.name if source_dir.name != "BOSS DATA" else ""
+            name = simpledialog.askstring(
+                "Create Virtual Card", "Name for this virtual card:", initialvalue=suggested, parent=self.root
+            )
+            if not name or not name.strip():
+                return
+            name = name.strip()
+            if self.state.smartmedia_lib.get_card(name):
+                messagebox.showwarning("Create Virtual Card", f"A card named '{name}' already exists.", parent=self.root)
+                return
+            card = VirtualCard(name=name, author=author_var.get().strip())
+            self.state.smartmedia_lib.create_card(card)
+            sp0_files = sorted(source_dir.glob("*.SP0"))
+            self.state.smartmedia_lib.import_sp0_files(name, source_dir, auto_backup=False)
+            card_dir = self.state.smartmedia_lib.cards_dir / name
+            active_smpinfo[0] = card_dir / "SMPINFO0.SP0"
+            open_card_status_var.set(f"Open: {name}")
+            refresh_card_list()
+            card_tree.selection_set(name)
+            on_card_select()
+            messagebox.showinfo(
+                "Create Virtual Card",
+                f"Created '{name}' with {len(sp0_files)} file(s) imported from {source_dir.name}.",
+                parent=self.root,
+            )
+
+        # Wire up buttons
+        ttk.Button(left_btn_row, text="New Card", command=new_card).pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Button(left_btn_row, text="Delete Card", command=delete_card).pack(side=tk.LEFT, padx=(0, 6))
+
+        ttk.Button(detail_btn_row, text="Save Changes", command=save_current_card).pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Button(detail_btn_row, text="Restore to Card", command=restore_to_card).pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Button(detail_btn_row, text="Open in Sample Manager", command=open_in_manager).pack(side=tk.LEFT, padx=(0, 6))
+
+        refresh_card_list()
+
+        self._create_menu(
+            open_card=open_card,
+            backup_card=backup_card,
+            new_card=new_card,
+            delete_card=delete_card,
+            save_current_card=save_current_card,
+            restore_to_card=restore_to_card,
+            open_in_manager=open_in_manager,
+            create_virtual_card_from_physical=create_virtual_card_from_physical,
+        )
+
+
+class PatternManagerWindow:
+    """Main application window"""
+
+    def __init__(self, root, state: 'AppState', lib_win: SmartMediaLibraryWindow, debug_mode: bool = False):
+        self.root = root
+        self.state = state
+        self.lib_win = lib_win
+        self.debug_mode = debug_mode
+        self.root.title("Dr. Sidekick — Pattern Manager")
+        self.root.configure(bg="#000000")
+        self.root.protocol("WM_DELETE_WINDOW", self.on_hide)
+
+        # Calculate window height: toolbar (~40) + ruler (25) + 32 lanes + statusbar (~25) + padding
+        window_height = 40 + 25 + (32 * 25) + 25 + 30  # ~920 pixels
+        self.root.geometry(f"1200x{window_height}")
+
         # Model
         self.model = PatternModel()
         self.current_palette = "Apple Green"
         self.slot_combo: Optional[ttk.Combobox] = None
-        self.smartmedia_library_root = Path(__file__).parent / "SmartMedia-Library"
-        self.smartmedia_library_root.mkdir(parents=True, exist_ok=True)
-        self.smartmedia_lib = SmartMediaLibrary(self.smartmedia_library_root)
-        self.load_config()
-        self.ensure_library_dirs()
         self.active_workflow = "Patterns"
         self.loaded_card_context = "Not loaded"
 
@@ -3638,7 +4892,15 @@ class SP303PatternEditor:
         # Start with new pattern
         self.on_new()
         self.refresh_slot_labels()
-        self.root.after(150, self.on_smartmedia_library)
+
+
+    def on_hide(self):
+        """Hide the Pattern Manager and return focus to the Library window."""
+        self.root.withdraw()
+        self.lib_win.root.deiconify()
+        self.lib_win.root.lift()
+
+    # ── Menu / toolbar / UI ──────────────────────────────────────────────
 
     def _create_menu(self):
         """Create menu bar"""
@@ -3736,16 +4998,89 @@ class SP303PatternEditor:
         # Help menu
         help_menu = tk.Menu(menubar, tearoff=0)
         menubar.add_cascade(label="Help", menu=help_menu)
-        help_menu.add_command(label="Quick Start", command=self.on_help_quick_start)
-        help_menu.add_command(label="Workflow Examples", command=self.on_help_workflow_examples)
-        help_menu.add_command(label="FAQ / Troubleshooting", command=self.on_help_faq)
-        help_menu.add_separator()
         help_menu.add_command(label="Keyboard Shortcuts", command=self.on_show_shortcuts)
-        help_menu.add_separator()
-        help_menu.add_command(label="Check for Update...", command=self.on_check_for_update)
-        help_menu.add_command(label="About", command=self.on_about)
-        help_menu.add_separator()
-        help_menu.add_command(label="View Session Log...", command=self.on_view_log)
+
+
+    def on_show_shortcuts(self):
+        """Show keyboard shortcuts"""
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Keyboard Shortcuts")
+        dialog.geometry("520x620")
+        dialog.resizable(True, True)
+        dialog.transient(self.root)
+        dialog.grab_set()
+        dialog.configure(bg="#000000")
+
+        canvas = tk.Canvas(dialog, bg="#000000", highlightthickness=0)
+        scrollbar = ttk.Scrollbar(dialog, orient=tk.VERTICAL, command=canvas.yview)
+        canvas.configure(yscrollcommand=scrollbar.set)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        outer = tk.Frame(canvas, bg="#000000", padx=16, pady=12)
+        canvas_window = canvas.create_window((0, 0), window=outer, anchor=tk.NW)
+
+        def on_frame_configure(_event):
+            canvas.configure(scrollregion=canvas.bbox("all"))
+        def on_canvas_configure(event):
+            canvas.itemconfig(canvas_window, width=event.width)
+        outer.bind("<Configure>", on_frame_configure)
+        canvas.bind("<Configure>", on_canvas_configure)
+
+        sections = [
+            ("FILE", [
+                ("Ctrl+N",        "New Pattern"),
+                ("Ctrl+O",        "Open Pattern"),
+                ("Ctrl+S",        "Save"),
+                ("Ctrl+Shift+S",  "Save As"),
+                ("Ctrl+Shift+L",  "SmartMedia Library"),
+                ("Ctrl+Q",        "Exit"),
+            ]),
+            ("EDIT", [
+                ("Ctrl+Z",        "Undo"),
+                ("Ctrl+Shift+Z",  "Redo"),
+                ("Ctrl+A",        "Select All"),
+                ("D / Del / Bksp","Delete Selected"),
+                ("Right-Click",   "Delete Event"),
+                ("[",             "Decrease Velocity"),
+                ("]",             "Increase Velocity"),
+                ("Ctrl+Shift+C",  "Copy Pattern"),
+                ("Ctrl+Shift+V",  "Paste Pattern"),
+            ]),
+            ("VIEW", [
+                ("Ctrl++",        "Zoom In"),
+                ("Ctrl+-",        "Zoom Out"),
+                ("Ctrl+0",        "Reset Zoom"),
+            ]),
+            ("NAVIGATION", [
+                ("Ctrl+Left",     "Previous Pattern"),
+                ("Ctrl+Right",    "Next Pattern"),
+            ]),
+            ("EDIT MODES", [
+                ("Draw",          "Click to add notes, drag to move, right-click to delete"),
+                ("Select",        "Click to select, drag to create selection rectangle"),
+                ("Erase",         "Click to delete notes"),
+            ]),
+        ]
+
+        row = 0
+        for section_name, items in sections:
+            tk.Label(
+                outer, text=section_name,
+                font=("", 9, "bold"), bg="#000000", fg="#888888", anchor="w",
+            ).grid(row=row, column=0, columnspan=2, sticky="w", pady=(10 if row > 0 else 0, 3))
+            row += 1
+            for key, desc in items:
+                tk.Label(
+                    outer, text=key,
+                    font=("TkFixedFont", 10), bg="#000000", fg="#ffffff", anchor="w", width=17,
+                ).grid(row=row, column=0, sticky="w", padx=(10, 0))
+                tk.Label(
+                    outer, text=desc,
+                    font=("TkFixedFont", 10), bg="#000000", fg="#cccccc", anchor="w",
+                ).grid(row=row, column=1, sticky="w")
+                row += 1
+
 
     def _create_toolbar(self):
         """Create toolbar"""
@@ -3892,7 +5227,7 @@ class SP303PatternEditor:
 
         ttk.Label(
             status_frame,
-            text=self.config.get("device", "BOSS Dr. Sample SP-303"),
+            text=self.state.config.get("device", "BOSS Dr. Sample SP-303"),
             relief=tk.SUNKEN,
             anchor=tk.E,
         ).pack(side=tk.RIGHT)
@@ -3911,51 +5246,6 @@ class SP303PatternEditor:
     def refresh_context_bar(self):
         if hasattr(self, "context_bar"):
             self.context_bar.config(text=self._build_context_text())
-
-    def on_backup_card_quick(self):
-        smpinfo_file = filedialog.askopenfilename(
-            title="Select Card Setup File (SMPINFO0.SP0)",
-            initialdir=str(self.default_card_mount_dir()),
-            filetypes=[("SMPINFO0.SP0", "SMPINFO0.SP0"), ("SP0 Files", "*.SP0"), ("All Files", "*.*")],
-        )
-        if not smpinfo_file:
-            return
-        card_dir = Path(smpinfo_file).parent
-        sp0_files = sorted(card_dir.glob("*.SP0"))
-        if not sp0_files:
-            messagebox.showwarning("Backup Card", "No .SP0 files found to back up.")
-            return
-        dest = self.smartmedia_lib.backup_dir / card_dir.name
-        dest.mkdir(parents=True, exist_ok=True)
-        for f in sp0_files:
-            shutil.copy(f, dest / f.name)
-        self.set_active_workflow("Backup/Restore")
-        self.set_loaded_card_context(str(card_dir))
-        self.show_text_dialog("Backup Card", f"Backed up {len(sp0_files)} .SP0 files\nDestination: {dest}", geometry="700x260")
-
-    def on_restore_backup_quick(self):
-        cards_root = self.smartmedia_lib.cards_dir
-        source_dir = filedialog.askdirectory(
-            title="Select Virtual Card Folder to Restore From",
-            initialdir=str(cards_root if cards_root.exists() else Path.home()),
-        )
-        if not source_dir:
-            return
-        preferred_output = Path("/Volumes/BOSS DATA")
-        if not preferred_output.exists():
-            preferred_output = self.get_library_paths()["outgoing"]
-        output_dir = self.ask_output_directory(preferred_output)
-        if output_dir is None:
-            return
-        sp0_files = sorted(Path(source_dir).glob("*.SP0"))
-        if not sp0_files:
-            messagebox.showwarning("Restore", "No .SP0 files found in selected folder.")
-            return
-        for sp0_file in sp0_files:
-            shutil.copy(sp0_file, output_dir / sp0_file.name)
-        self.set_active_workflow("Backup/Restore")
-        self.set_loaded_card_context(str(output_dir))
-        messagebox.showinfo("Restore", f"Restored {len(sp0_files)} .SP0 file(s).")
 
 
 
@@ -4100,7 +5390,7 @@ class SP303PatternEditor:
         # Ask for PTNINFO file
         ptninfo_path = filedialog.askopenfilename(
             title="Open PTNINFO0.SP0",
-            initialdir=str(self.default_pattern_open_dir()),
+            initialdir=str(self.state.default_pattern_open_dir()),
             filetypes=[("PTNINFO Files", "PTNINFO0.SP0")]
         )
 
@@ -4166,7 +5456,7 @@ class SP303PatternEditor:
         # Ask for directory
         directory = filedialog.askdirectory(
             title="Select Output Directory",
-            initialdir=str(self.default_pattern_save_dir())
+            initialdir=str(self.state.default_pattern_save_dir())
         )
         if not directory:
             return
@@ -4188,7 +5478,7 @@ class SP303PatternEditor:
         if self.model.dirty:
             if not messagebox.askyesno("Unsaved Changes", "Exit without saving?"):
                 return
-        self.root.quit()
+        self.lib_win.root.destroy()
 
     def on_undo(self):
         """Undo last operation"""
@@ -5043,94 +6333,12 @@ Velocity:
         ttk.Button(button_row, text="Exchange", command=do_exchange).pack(side=tk.RIGHT)
         ttk.Button(button_row, text="Cancel", command=dialog.destroy).pack(side=tk.RIGHT, padx=(0, 8))
 
-    def on_slot_map(self):
-        """Show slot-to-pattern mapping with event presence"""
-        if self.model.ptninfo is None or self.model.ptndata is None:
-            messagebox.showwarning("No Pattern Files", "Load or create pattern files first.")
-            return
-
-        lines = []
-        for slot in range(16):
-            label = self.slot_index_to_label(slot)
-            entry = self.model.get_ptninfo_entry(slot)
-            entry_hex = entry.hex() if entry is not None else "----"
-            mapping_index = self.model.get_mapping_index(slot)
-            if mapping_index is not None and 1 <= mapping_index <= 16:
-                mapped_slot = mapping_index - 1
-                events = self.model.ptndata.decode_events(mapped_slot)
-                event_count = len(events)
-                pads_used = len(set(e.pad for e in events)) if events else 0
-                lines.append(
-                    f"{label:>2} (slot {slot:02d}) | entry {entry_hex} | idx {mapping_index:02d} -> slot {mapped_slot:02d} | events {event_count:02d} pads {pads_used}"
-                )
-            else:
-                events = self.model.ptndata.decode_events(slot)
-                event_count = len(events)
-                pads_used = len(set(e.pad for e in events)) if events else 0
-                lines.append(
-                    f"{label:>2} (slot {slot:02d}) | entry {entry_hex} | idx -- -> slot -- | events {event_count:02d} pads {pads_used}"
-                )
-
-        info_text = "Slot Map (PTNINFO -> PTNDATA)\n\n" + "\n".join(lines)
-        messagebox.showinfo("Slot Map", info_text)
-
     def ask_output_directory(self, initialdir: Optional[Path] = None) -> Optional[Path]:
         kwargs = {"title": "Select Output Directory"}
         if initialdir is not None:
             kwargs["initialdir"] = str(initialdir)
         output_dir = filedialog.askdirectory(**kwargs)
         return Path(output_dir) if output_dir else None
-
-    def get_library_paths(self) -> dict:
-        return {
-            "root": self.smartmedia_library_root,
-            "cards": self.smartmedia_library_root / "Cards",
-            "incoming": self.smartmedia_library_root / "Cards" / "BOSS DATA_INCOMING",
-            "outgoing": self.smartmedia_library_root / "Cards" / "BOSS DATA_OUTGOING",
-        }
-
-    def ensure_library_dirs(self):
-        self.smartmedia_lib.ensure_dirs()
-        for name in ("BOSS DATA_INCOMING", "BOSS DATA_OUTGOING"):
-            if self.smartmedia_lib.get_card(name) is None:
-                self.smartmedia_lib.create_card(VirtualCard(name=name, author="Dr. Sample"))
-
-    def default_card_mount_dir(self) -> Path:
-        if sys.platform == "darwin":
-            preferred = Path("/Volumes/BOSS DATA")
-            if preferred.exists():
-                return preferred
-            incoming = self.get_library_paths()["incoming"]
-            return incoming if incoming.exists() else Path("/Volumes")
-
-        config_path = self.config.get("card_mount_path", "")
-        if config_path:
-            candidate = Path(config_path)
-            if candidate.exists():
-                return candidate
-
-        outgoing = self.get_library_paths()["outgoing"]
-        return outgoing if outgoing.exists() else Path.cwd()
-
-    def default_pattern_open_dir(self) -> Path:
-        """Default directory for File > Open."""
-        preferred = Path("/Volumes/BOSS DATA")
-        if preferred.exists():
-            return preferred
-        incoming = self.get_library_paths()["incoming"]
-        if incoming.exists():
-            return incoming
-        return self.smartmedia_library_root
-
-    def default_pattern_save_dir(self) -> Path:
-        """Default directory for File > Save As."""
-        preferred = Path("/Volumes/BOSS DATA")
-        if preferred.exists():
-            return preferred
-        outgoing = self.get_library_paths()["outgoing"]
-        if outgoing.exists():
-            return outgoing
-        return self.smartmedia_library_root
 
     def show_prepare_results(
         self,
@@ -5150,44 +6358,7 @@ Velocity:
                 lines.append("SMPINFO0.SP0 created")
         if extra_lines:
             lines.extend(extra_lines)
-        self.show_text_dialog(title, "\n".join(lines), geometry="1024x640")
-
-    def show_text_dialog(self, title: str, content: str, geometry: str = "1024x640"):
-        dialog = tk.Toplevel(self.root)
-        dialog.title(title)
-        dialog.geometry(geometry)
-        dialog.transient(self.root)
-        dialog.grab_set()
-        dialog.configure(bg="#000000")
-
-        frame = ttk.Frame(dialog, padding=10)
-        frame.pack(fill=tk.BOTH, expand=True)
-
-        text_frame = ttk.Frame(frame)
-        text_frame.pack(fill=tk.BOTH, expand=True)
-
-        text = tk.Text(
-            text_frame,
-            wrap=tk.NONE,
-            font=("TkFixedFont", 11),
-            bg="#000000",
-            fg="#ffffff",
-            insertbackground="#ffffff",
-            relief=tk.FLAT,
-            highlightthickness=0,
-        )
-        text.insert("1.0", content)
-        text.configure(state=tk.DISABLED)
-        text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-
-        y_scroll = ttk.Scrollbar(text_frame, orient=tk.VERTICAL, command=text.yview)
-        y_scroll.pack(side=tk.RIGHT, fill=tk.Y)
-        text.configure(yscrollcommand=y_scroll.set)
-
-        x_scroll = ttk.Scrollbar(frame, orient=tk.HORIZONTAL, command=text.xview)
-        x_scroll.pack(fill=tk.X)
-        text.configure(xscrollcommand=x_scroll.set)
-
+        show_text_dialog(self.root, title, "\n".join(lines), geometry="1024x640")
 
     def archive_existing_outgoing_wavs(self, output_dir: Path) -> Optional[Path]:
         wav_files = sorted(
@@ -5232,7 +6403,7 @@ Velocity:
                 return
             wav_dir_path = Path(wav_dir)
 
-        output_dir = self.get_library_paths()["outgoing"]
+        output_dir = self.state.get_library_paths()["outgoing"]
         output_dir.mkdir(parents=True, exist_ok=True)
 
         try:
@@ -5318,14 +6489,14 @@ Velocity:
                     return f
             return None
 
-        self.smartmedia_lib.ensure_dirs()
+        self.state.smartmedia_lib.ensure_dirs()
         card_name = pgm_path.stem
-        card_dir = self.smartmedia_lib.cards_dir / card_name
+        card_dir = self.state.smartmedia_lib.cards_dir / card_name
         if card_dir.exists():
             shutil.rmtree(card_dir)
         card_dir.mkdir(parents=True, exist_ok=True)
         card = VirtualCard(name=card_name, tags=["mpc1000"])
-        self.smartmedia_lib.create_card(card)
+        self.state.smartmedia_lib.create_card(card)
 
         prep = SP303CardPrep()
         summary_lines = [f"Program: {pgm_path.name}", f"WAV folder: {wav_dir_path.name}", ""]
@@ -5372,382 +6543,16 @@ Velocity:
         summary_lines.append(f"\nSaved to: {card_dir}")
         summary_lines.append("Load one BANK_LOAD folder at a time on the SP-303.")
 
-        self.show_text_dialog("MPC1000 Import Complete", "\n".join(summary_lines))
+        show_text_dialog(self.root, "MPC1000 Import Complete", "\n".join(summary_lines))
         self.update_status(
             f"MPC1000 import complete: {total_written} samples written to Cards/{card_name}"
         )
         log.info("MPC1000 import: %s -> Cards/%s (%d samples)", pgm_path.name, card_name, total_written)
 
     def on_smartmedia_library(self):
-        """Virtual SmartMedia Library dialog."""
-        self.smartmedia_lib.ensure_dirs()
-        dialog = tk.Toplevel(self.root)
-        dialog.title("SmartMedia Library")
-        dialog.geometry("1200x720")
-        dialog.transient(self.root)
-        dialog.grab_set()
-        dialog.configure(bg="#000000")
-
-        frame = ttk.Frame(dialog, padding=10)
-        frame.pack(fill=tk.BOTH, expand=True)
-
-        # ── Branding header ─────────────────────────────────────────────────
-        header_frame = ttk.Frame(frame)
-        header_frame.pack(fill=tk.X, pady=(0, 6))
-        ttk.Label(header_frame, text="Dr. Sidekick", font=("Courier", 18, "bold")).pack(side=tk.LEFT)
-        ttk.Label(header_frame, text="Pattern editor and SmartMedia librarian for the Boss Dr. Sample SP-303.",
-                  font=("Courier", 9)).pack(side=tk.LEFT, padx=(12, 0), anchor=tk.S, pady=(0, 3))
-        def open_pattern_manager():
-            self.root.deiconify()
-            self.root.lift()
-            dialog.destroy()
-
-        dialog.protocol("WM_DELETE_WINDOW", open_pattern_manager)
-        ttk.Button(header_frame, text="Open Pattern Manager",
-                   command=open_pattern_manager).pack(side=tk.RIGHT)
-
-        # ── Top status bar ──────────────────────────────────────────────────
-        top_bar = ttk.Frame(frame)
-        top_bar.pack(fill=tk.X, pady=(0, 8))
-
-        card_status_var = tk.StringVar(value="Checking physical card...")
-        card_status_lbl = ttk.Label(top_bar, textvariable=card_status_var, font=("Courier", 10))
-        card_status_lbl.pack(side=tk.LEFT)
-
-        write_to_card_var = tk.BooleanVar(value=self.config.get("write_to_card", True))
-        def on_write_toggle():
-            self.config["write_to_card"] = write_to_card_var.get()
-            self.save_config()
-        ttk.Checkbutton(top_bar, text="Write to Card", variable=write_to_card_var,
-                        command=on_write_toggle).pack(side=tk.RIGHT)
-
-        open_card_status_var = tk.StringVar(value="No card open")
-        ttk.Label(top_bar, textvariable=open_card_status_var, font=("Courier", 10)).pack(side=tk.RIGHT, padx=(0, 16))
-
-        def refresh_card_status():
-            preferred = Path("/Volumes/BOSS DATA")
-            if preferred.exists():
-                card_status_var.set(f"● BOSS DATA mounted: {preferred}")
-            else:
-                card_status_var.set("○ No physical card mounted")
-            if dialog.winfo_exists():
-                dialog.after(2000, refresh_card_status)
-        refresh_card_status()
-
-        auto_backup_var = tk.BooleanVar(value=self.config.get("auto_backup_on_open", False))
-        def on_auto_backup_toggle():
-            self.config["auto_backup_on_open"] = auto_backup_var.get()
-            self.save_config()
-
-        def open_card():
-            preferred = Path("/Volumes/BOSS DATA") / "SMPINFO0.SP0"
-            if preferred.exists():
-                path = preferred
-            else:
-                chosen = filedialog.askopenfilename(
-                    parent=dialog,
-                    title="Select SMPINFO0.SP0",
-                    initialdir=str(self.default_card_mount_dir()),
-                    filetypes=[("SMPINFO0.SP0", "SMPINFO0.SP0"), ("SP0 Files", "*.SP0"), ("All Files", "*.*")],
-                )
-                if not chosen:
-                    return
-                path = Path(chosen)
-            active_smpinfo[0] = path
-            open_card_status_var.set(f"Open: {path.parent.name}")
-            if auto_backup_var.get():
-                try:
-                    source = path.parent
-                    dest = self.smartmedia_lib.backup_dir / source.name
-                    dest.mkdir(parents=True, exist_ok=True)
-                    for f in sorted(source.glob("*.SP0")):
-                        shutil.copy(f, dest / f.name)
-                except Exception:
-                    pass
-
-        def backup_card():
-            card_dir = Path("/Volumes/BOSS DATA")
-            if not card_dir.exists():
-                if active_smpinfo[0] is not None:
-                    card_dir = active_smpinfo[0].parent
-                else:
-                    messagebox.showwarning("Backup Card", "No physical card mounted or open.", parent=dialog)
-                    return
-            sp0_files = sorted(card_dir.glob("*.SP0"))
-            if not sp0_files:
-                messagebox.showwarning("Backup Card", "No .SP0 files found on card.", parent=dialog)
-                return
-            try:
-                dest = self.smartmedia_lib.backup_dir / card_dir.name
-                dest.mkdir(parents=True, exist_ok=True)
-                for f in sp0_files:
-                    shutil.copy(f, dest / f.name)
-                messagebox.showinfo("Backup Card", f"Backed up {len(sp0_files)} file(s) to Backup/{card_dir.name}/", parent=dialog)
-            except Exception as exc:
-                messagebox.showerror("Backup Card", str(exc), parent=dialog)
-
-        ttk.Button(top_bar, text="Open Card", command=open_card).pack(side=tk.LEFT, padx=(12, 0))
-        ttk.Button(top_bar, text="Create Virtual Card", command=lambda: create_virtual_card_from_physical()).pack(side=tk.LEFT, padx=(6, 0))
-        ttk.Button(top_bar, text="Backup Card", command=backup_card).pack(side=tk.LEFT, padx=(6, 0))
-        ttk.Checkbutton(top_bar, text="Auto-backup on Open", variable=auto_backup_var,
-                        command=on_auto_backup_toggle).pack(side=tk.LEFT, padx=(12, 0))
-
-        # ── Main two-panel layout ────────────────────────────────────────────
-        paned = ttk.PanedWindow(frame, orient=tk.HORIZONTAL)
-        paned.pack(fill=tk.BOTH, expand=True)
-
-        # ── Left panel: card browser ─────────────────────────────────────────
-        left_frame = ttk.Frame(paned, padding=4)
-        paned.add(left_frame, weight=1)
-
-        ttk.Label(left_frame, text="VIRTUAL CARDS", font=("Courier", 11, "bold")).pack(anchor=tk.W, pady=(0, 4))
-
-        filter_row = ttk.Frame(left_frame)
-        filter_row.pack(fill=tk.X, pady=(0, 4))
-        search_var = tk.StringVar()
-        search_entry = ttk.Entry(filter_row, textvariable=search_var)
-        search_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 4))
-
-        card_tree_cols = ("name", "author", "ptn")
-        style = ttk.Style(dialog)
-        style.configure("Library.Treeview", background="#000000", fieldbackground="#000000",
-                        foreground="#ffffff", rowheight=22)
-        style.map("Library.Treeview", background=[("selected", "#2a7fff")],
-                  foreground=[("selected", "#ffffff")])
-        card_tree = ttk.Treeview(left_frame, columns=card_tree_cols, show="headings",
-                                 height=20, style="Library.Treeview")
-        card_tree.heading("name", text="Name")
-        card_tree.heading("author", text="Author")
-        card_tree.heading("ptn", text="PTN")
-        card_tree.column("name", width=160)
-        card_tree.column("author", width=120)
-        card_tree.column("ptn", width=40, anchor=tk.CENTER)
-        card_tree.tag_configure("active", background="#2a7fff", foreground="#ffffff")
-        card_tree.pack(fill=tk.BOTH, expand=True)
-
-        left_btn_row = ttk.Frame(left_frame)
-        left_btn_row.pack(fill=tk.X, pady=(6, 0))
-
-        # ── Right panel: card detail + history ───────────────────────────────
-        right_frame = ttk.Frame(paned, padding=4)
-        paned.add(right_frame, weight=2)
-
-        detail_title = ttk.Label(right_frame, text="CARD DETAIL", font=("Courier", 11, "bold"))
-        detail_title.pack(anchor=tk.W, pady=(0, 6))
-
-        # Card detail fields
-        detail_frame = ttk.Frame(right_frame)
-        detail_frame.pack(fill=tk.X)
-
-        def make_field(parent, label, row):
-            ttk.Label(parent, text=label, width=12, anchor=tk.E).grid(row=row, column=0, sticky=tk.E, padx=(0, 6), pady=2)
-            var = tk.StringVar()
-            entry = ttk.Entry(parent, textvariable=var)
-            entry.grid(row=row, column=1, sticky=tk.EW, pady=2)
-            parent.columnconfigure(1, weight=1)
-            return var, entry
-
-        name_var, name_entry = make_field(detail_frame, "Name:", 0)
-        author_var, author_entry = make_field(detail_frame, "Author:", 1)
-        categories_var, categories_entry = make_field(detail_frame, "Categories:", 2)
-        tags_var, tags_entry = make_field(detail_frame, "Tags:", 3)
-
-        wp_var = tk.BooleanVar(value=False)
-        wp_btn = ttk.Checkbutton(detail_frame, text="Write Protect", variable=wp_var)
-        wp_btn.grid(row=4, column=1, sticky=tk.W, pady=4)
-
-        # Pre-fill author from last used
-        author_var.set(self.config.get("last_author", ""))
-
-        # Pad notes
-        pad_notes_frame = ttk.LabelFrame(right_frame, text="PAD NOTES", padding=4)
-        pad_notes_frame.pack(fill=tk.X, pady=(8, 0))
-
-        pad_note_vars: Dict[str, tk.StringVar] = {}
-        for i, pad in enumerate(SP303_PADS):
-            col = i % 8
-            base_row = (i // 8) * 2
-            ttk.Label(pad_notes_frame, text=pad, anchor=tk.CENTER, width=6).grid(
-                row=base_row, column=col, padx=2, sticky=tk.EW)
-            var = tk.StringVar()
-            ttk.Entry(pad_notes_frame, textvariable=var, width=8).grid(
-                row=base_row + 1, column=col, padx=2, pady=(0, 4), sticky=tk.EW)
-            pad_note_vars[pad] = var
-            pad_notes_frame.columnconfigure(col, weight=1)
-
-        detail_btn_row = ttk.Frame(right_frame)
-        detail_btn_row.pack(fill=tk.X, pady=(6, 0))
-
-        # ── State ─────────────────────────────────────────────────────────────
-        current_card: list = [None]   # list-of-one to allow mutation in closures
-        active_smpinfo: list = [None]  # Path to currently opened SMPINFO0.SP0
-
-        def get_all_cards():
-            query = search_var.get().strip().lower()
-            cards = self.smartmedia_lib.list_cards()
-            if query:
-                cards = [c for c in cards if query in c.name.lower() or query in c.author.lower()
-                         or any(query in cat.lower() for cat in c.categories)]
-            return cards
-
-        def refresh_card_list():
-            active_name = current_card[0].name if current_card[0] else None
-            existing = set(card_tree.get_children())
-            seen = set()
-            for card in get_all_cards():
-                tag = ("active",) if card.name == active_name else ()
-                ptn_dot = "●" if self.smartmedia_lib.card_has_patterns(card.name) else "○"
-                if card.name in existing:
-                    card_tree.item(card.name, values=(card.name, card.author, ptn_dot), tags=tag)
-                else:
-                    card_tree.insert("", tk.END, iid=card.name, values=(card.name, card.author, ptn_dot), tags=tag)
-                seen.add(card.name)
-            for stale in existing - seen:
-                card_tree.delete(stale)
-
-        def on_card_select(event=None):
-            sel = card_tree.selection()
-            for item in card_tree.get_children():
-                card_tree.item(item, tags=())
-            if not sel:
-                current_card[0] = None
-                return
-            card_tree.item(sel[0], tags=("active",))
-            card = self.smartmedia_lib.get_card(sel[0])
-            if card is None:
-                return
-            current_card[0] = card
-            name_var.set(card.name)
-            author_var.set(card.author)
-            categories_var.set(", ".join(card.categories))
-            tags_var.set(", ".join(card.tags))
-            wp_var.set(card.write_protect)
-            for pad, var in pad_note_vars.items():
-                var.set(card.pad_notes.get(pad, ""))
-
-        card_tree.bind("<<TreeviewSelect>>", on_card_select)
-        search_var.trace_add("write", lambda *_: refresh_card_list())
-
-        def save_current_card():
-            card = current_card[0]
-            if card is None:
-                return
-            card.name = name_var.get().strip()
-            card.author = author_var.get().strip()
-            card.categories = [c.strip() for c in categories_var.get().split(",") if c.strip()]
-            card.tags = [t.strip() for t in tags_var.get().split(",") if t.strip()]
-            card.pad_notes = {pad: var.get().strip() for pad, var in pad_note_vars.items() if var.get().strip()}
-            card.write_protect = wp_var.get()
-            if card.author:
-                self.config["last_author"] = card.author
-                self.save_config()
-            self.smartmedia_lib.save_card(card)
-            refresh_card_list()
-
-        def new_card():
-            new_name = simpledialog.askstring("New Virtual Card", "Card name:", parent=dialog)
-            if not new_name or not new_name.strip():
-                return
-            new_name = new_name.strip()
-            if self.smartmedia_lib.get_card(new_name):
-                messagebox.showwarning("New Card", f"A card named '{new_name}' already exists.", parent=dialog)
-                return
-            card = VirtualCard(name=new_name)
-            self.smartmedia_lib.create_card(card)
-            refresh_card_list()
-            card_tree.selection_set(new_name)
-            on_card_select()
-
-        def delete_card():
-            card = current_card[0]
-            if card is None:
-                messagebox.showinfo("Delete Card", "Select a card first.", parent=dialog)
-                return
-            if card.write_protect:
-                messagebox.showwarning("Delete Card", "Card is write-protected.", parent=dialog)
-                return
-            if messagebox.askyesno("Delete Card", f"Delete '{card.name}'? This cannot be undone.", parent=dialog):
-                self.smartmedia_lib.delete_card(card.name)
-                current_card[0] = None
-                refresh_card_list()
-
-        def restore_to_card():
-            card = current_card[0]
-            if card is None:
-                messagebox.showinfo("Restore to Card", "Select a virtual card first.", parent=dialog)
-                return
-            sp0_files = list((self.smartmedia_lib.cards_dir / card.name).glob("*.SP0"))
-            if not sp0_files:
-                messagebox.showwarning("Restore to Card", f"'{card.name}' has no SP0 files to restore.", parent=dialog)
-                return
-            preferred = Path("/Volumes/BOSS DATA")
-            target = preferred if preferred.exists() else self.get_library_paths()["outgoing"]
-            if not messagebox.askyesno("Restore to Card",
-                                       f"Restore '{card.name}' to:\n{target}\n\nThis will overwrite files. Continue?",
-                                       parent=dialog):
-                return
-            try:
-                self.smartmedia_lib.restore_card(card.name, target)
-                messagebox.showinfo("Restore to Card", f"Restored to {target}", parent=dialog)
-            except Exception as exc:
-                messagebox.showerror("Restore to Card", str(exc), parent=dialog)
-
-        def open_in_manager():
-            if active_smpinfo[0] is None:
-                messagebox.showinfo(
-                    "Sample Manager",
-                    "Open a card first using the Open Card button.",
-                    parent=dialog,
-                )
-                return
-            self.on_sample_manager(smpinfo_path=active_smpinfo[0])
-
-        def create_virtual_card_from_physical():
-            if active_smpinfo[0] is None:
-                messagebox.showinfo(
-                    "Create Virtual Card",
-                    "Open a physical card first using the Open Card button.",
-                    parent=dialog,
-                )
-                return
-            source_dir = active_smpinfo[0].parent
-            suggested = source_dir.name if source_dir.name != "BOSS DATA" else ""
-            name = simpledialog.askstring(
-                "Create Virtual Card", "Name for this virtual card:", initialvalue=suggested, parent=dialog
-            )
-            if not name or not name.strip():
-                return
-            name = name.strip()
-            if self.smartmedia_lib.get_card(name):
-                messagebox.showwarning("Create Virtual Card", f"A card named '{name}' already exists.", parent=dialog)
-                return
-            card = VirtualCard(name=name, author=author_var.get().strip())
-            self.smartmedia_lib.create_card(card)
-            sp0_files = sorted(source_dir.glob("*.SP0"))
-            self.smartmedia_lib.import_sp0_files(name, source_dir, auto_backup=False)
-            card_dir = self.smartmedia_lib.cards_dir / name
-            active_smpinfo[0] = card_dir / "SMPINFO0.SP0"
-            open_card_status_var.set(f"Open: {name}")
-            refresh_card_list()
-            card_tree.selection_set(name)
-            on_card_select()
-            messagebox.showinfo(
-                "Create Virtual Card",
-                f"Created '{name}' with {len(sp0_files)} file(s) imported from {source_dir.name}.",
-                parent=dialog,
-            )
-
-        # Wire up buttons
-        ttk.Button(left_btn_row, text="New Card", command=new_card).pack(side=tk.LEFT, padx=(0, 6))
-        ttk.Button(left_btn_row, text="Delete Card", command=delete_card).pack(side=tk.LEFT, padx=(0, 6))
-
-        ttk.Button(detail_btn_row, text="Save Changes", command=save_current_card).pack(side=tk.LEFT, padx=(0, 6))
-        ttk.Button(detail_btn_row, text="Restore to Card", command=restore_to_card).pack(side=tk.LEFT, padx=(0, 6))
-        ttk.Button(detail_btn_row, text="Open in Sample Manager", command=open_in_manager).pack(side=tk.LEFT, padx=(0, 6))
-
-        ttk.Button(frame, text="Close", command=dialog.destroy).pack(side=tk.BOTTOM, anchor=tk.E, pady=(8, 0))
-
-        refresh_card_list()
+        """Bring the SmartMedia Library window to the front."""
+        self.lib_win.root.deiconify()
+        self.lib_win.root.lift()
 
     def on_sample_manager(self, smpinfo_path: Optional[Path] = None):
         session = AssignmentSession()
@@ -5849,6 +6654,7 @@ Velocity:
         loaded_smpinfo_bytes: Optional[bytes] = None
         loaded_smpinfo_path: Optional[Path] = None
         baseline_assignments: Dict[int, str] = {}
+        _playback: List = [None, None]  # [subprocess.Popen, tmp_wav_path]
 
         def slot_to_label(slot: int) -> str:
             bank = "C" if slot < 8 else "D"
@@ -6092,7 +6898,7 @@ Velocity:
             smpinfo_file = filedialog.askopenfilename(
                 parent=dialog,
                 title="Select SMPINFO0.SP0",
-                initialdir=str(self.default_card_mount_dir()),
+                initialdir=str(self.state.default_card_mount_dir()),
                 filetypes=[("SMPINFO0.SP0", "SMPINFO0.SP0"), ("SP0 Files", "*.SP0"), ("All Files", "*.*")],
             )
             if not smpinfo_file:
@@ -6117,7 +6923,7 @@ Velocity:
             nonlocal loaded_smpinfo_bytes
             preferred_output = Path("/Volumes/BOSS DATA")
             if not preferred_output.exists():
-                preferred_output = self.get_library_paths()["outgoing"]
+                preferred_output = self.state.get_library_paths()["outgoing"]
             output_dir = self.ask_output_directory(preferred_output)
             if output_dir is None:
                 return
@@ -6277,13 +7083,157 @@ Velocity:
             ttk.Button(action_row, text="Cancel", command=confirm_dialog.destroy).pack(side=tk.RIGHT)
             ttk.Button(action_row, text="Write Changes", command=do_write).pack(side=tk.RIGHT, padx=(0, 6))
 
+        def stop_playback():
+            proc, tmp = _playback[0], _playback[1]
+            _playback[0] = None
+            _playback[1] = None
+            if proc is not None:
+                try:
+                    proc.terminate()
+                except Exception:
+                    pass
+            if tmp is not None:
+                try:
+                    os.unlink(tmp)
+                except Exception:
+                    pass
+
+        def _launch_playback(file_path: str, tmp_path: Optional[str] = None):
+            if sys.platform == 'darwin':
+                cmd = ['afplay', file_path]
+            elif sys.platform.startswith('linux'):
+                cmd = ['aplay', file_path]
+            else:
+                messagebox.showinfo("Preview", "Audio preview is not supported on this platform.", parent=dialog)
+                return
+            try:
+                proc = subprocess.Popen(cmd)
+            except Exception as exc:
+                messagebox.showerror("Preview", str(exc), parent=dialog)
+                return
+            _playback[0] = proc
+            _playback[1] = tmp_path
+            def _cleanup(p, tmp):
+                try:
+                    p.wait(timeout=120)
+                except Exception:
+                    pass
+                if _playback[0] is p:
+                    _playback[0] = None
+                if tmp:
+                    if _playback[1] == tmp:
+                        _playback[1] = None
+                    try:
+                        os.unlink(tmp)
+                    except Exception:
+                        pass
+            threading.Thread(target=_cleanup, args=(proc, tmp_path), daemon=True).start()
+
+        def _decode_sp0_to_pcm(l_path: Path, is_stereo: bool):
+            """Decode SP0 (mono or stereo pair) to (pcm_list, num_samples, num_channels)."""
+            samples_l = sp303_decode_sp0(str(l_path))
+            if is_stereo:
+                r_path = l_path.with_name(l_path.name[:-5] + "R.SP0")
+                if r_path.exists():
+                    samples_r = sp303_decode_sp0(str(r_path))
+                    n = max(len(samples_l), len(samples_r))
+                    samples_l += [0] * (n - len(samples_l))
+                    samples_r += [0] * (n - len(samples_r))
+                    pcm = [v for pair in zip(samples_l, samples_r) for v in pair]
+                    return pcm, n, 2
+            return samples_l, len(samples_l), 1
+
+        def preview_pad():
+            slot = selected_slot()
+            if slot is None:
+                return
+            source = session.prep.sources[slot]
+            if source.source_type == SourceType.EMPTY or source.source_path is None:
+                messagebox.showinfo("Preview", "No sample assigned to this pad.", parent=dialog)
+                return
+            stop_playback()
+            try:
+                if source.source_type == SourceType.ARCHIVED_SP0:
+                    pcm, n_samples, channels = _decode_sp0_to_pcm(source.source_path, source.is_stereo)
+                    fd, tmp_path = tempfile.mkstemp(suffix='.wav')
+                    with os.fdopen(fd, 'wb') as f:
+                        sp303_write_wav(f, n_samples, 32000, channels)
+                        f.write(struct.pack(f'<{len(pcm)}h', *pcm))
+                    _launch_playback(tmp_path, tmp_path)
+                else:
+                    _launch_playback(str(source.source_path))
+            except Exception as exc:
+                messagebox.showerror("Preview", str(exc), parent=dialog)
+
+        def convert_sp0_to_wav():
+            l_path: Optional[Path] = None
+            is_stereo = False
+            sel = tree.selection()
+            if sel:
+                source = session.prep.sources[int(sel[0])]
+                if source.source_type == SourceType.ARCHIVED_SP0 and source.source_path is not None:
+                    l_path = source.source_path
+                    is_stereo = source.is_stereo
+            if l_path is None:
+                sp0_file = filedialog.askopenfilename(
+                    parent=dialog,
+                    title="Select SP0 File to Convert",
+                    filetypes=[("SP0 Files", "*.SP0 *.sp0"), ("All Files", "*.*")],
+                )
+                if not sp0_file:
+                    return
+                l_path = Path(sp0_file)
+                if l_path.name.upper().endswith('L.SP0'):
+                    r_path = l_path.with_name(l_path.name[:-5] + "R.SP0")
+                    is_stereo = r_path.exists()
+            stem = l_path.stem[:-1] if l_path.stem.upper().endswith('L') else l_path.stem
+            out_file = filedialog.asksaveasfilename(
+                parent=dialog,
+                title="Save WAV As",
+                initialfile=stem + '.wav',
+                defaultextension='.wav',
+                filetypes=[("WAV Files", "*.wav"), ("All Files", "*.*")],
+            )
+            if not out_file:
+                return
+            try:
+                pcm, n_samples, channels = _decode_sp0_to_pcm(l_path, is_stereo)
+                with open(out_file, 'wb') as f:
+                    sp303_write_wav(f, n_samples, 32000, channels)
+                    f.write(struct.pack(f'<{len(pcm)}h', *pcm))
+                duration = n_samples / 32000.0
+                messagebox.showinfo(
+                    "Convert SP0 to WAV",
+                    f"Saved: {out_file}\n{n_samples:,} samples  {duration:.2f}s  "
+                    f"{'Stereo' if channels == 2 else 'Mono'}  32 kHz",
+                    parent=dialog,
+                )
+                log.info("SP0 → WAV: %s → %s (%.2fs, %s)", l_path.name, out_file, duration,
+                         'stereo' if channels == 2 else 'mono')
+            except Exception as exc:
+                messagebox.showerror("Convert SP0 to WAV", str(exc), parent=dialog)
+
+        def on_dialog_close():
+            stop_playback()
+            dialog.destroy()
+
         ttk.Button(setup_row, text="Load Card Setup", command=load_smpinfo_metadata).pack(side=tk.LEFT, padx=(0, 6))
         ttk.Button(route_row, text="Assign WAV", command=assign_wav).pack(side=tk.LEFT, padx=(0, 6))
         ttk.Button(route_row, text="Assign SP0", command=assign_sp0).pack(side=tk.LEFT, padx=(0, 6))
         ttk.Button(route_row, text="Clear Pad", command=clear_pad).pack(side=tk.LEFT, padx=(0, 6))
         ttk.Button(route_row, text="Refresh", command=refresh_tree).pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Button(route_row, text="Preview", command=preview_pad).pack(side=tk.LEFT, padx=(0, 6))
         ttk.Button(write_row, text="Write Changes to Card", command=prepare_card_now).pack(side=tk.LEFT, padx=(0, 6))
-        ttk.Button(write_row, text="Close", command=dialog.destroy).pack(side=tk.RIGHT)
+        ttk.Button(write_row, text="Close", command=on_dialog_close).pack(side=tk.RIGHT)
+
+        sm_menubar = tk.Menu(dialog, tearoff=0)
+        sm_tools = tk.Menu(sm_menubar, tearoff=0)
+        sm_menubar.add_cascade(label="Tools", menu=sm_tools)
+        sm_tools.add_command(label="Preview Selected Pad", command=preview_pad, accelerator="Space")
+        sm_tools.add_command(label="Convert SP0 to WAV...", command=convert_sp0_to_wav)
+        dialog.configure(menu=sm_menubar)
+        tree.bind("<space>", lambda e: preview_pad())
+        dialog.protocol("WM_DELETE_WINDOW", on_dialog_close)
 
         if TKDND_AVAILABLE and hasattr(tree, "drop_target_register"):
             def on_tree_drop_position(event):
@@ -6473,7 +7423,7 @@ Velocity:
             dialog.after(50, lambda: load_smpinfo_from_path(smpinfo_path))
 
     def on_add_groove_pattern_card(self):
-        groove_dir = self.get_library_paths()["incoming"]
+        groove_dir = self.state.get_library_paths()["incoming"]
         groove_file = filedialog.askopenfilename(
             title="Select Groove MIDI",
             initialdir=str(groove_dir),
@@ -6482,7 +7432,7 @@ Velocity:
         if not groove_file:
             return
 
-        card_dir = filedialog.askdirectory(title="Select Card Directory", initialdir=str(self.default_card_mount_dir()))
+        card_dir = filedialog.askdirectory(title="Select Card Directory", initialdir=str(self.state.default_card_mount_dir()))
         if not card_dir:
             return
 
@@ -6506,548 +7456,17 @@ Velocity:
         except Exception as exc:
             messagebox.showerror("Add Groove Pattern", str(exc))
 
-    def on_analyze_existing_card(self):
-        default_mount = self.default_card_mount_dir()
-        smpinfo_file = filedialog.askopenfilename(
-            title="Select SMPINFO0.SP0 (Analyse)",
-            initialdir=str(default_mount),
-            filetypes=[("SMPINFO0.SP0", "SMPINFO0.SP0"), ("SP0 Files", "*.SP0"), ("All Files", "*.*")],
-        )
-        if not smpinfo_file:
-            return
-
-        try:
-            analysis = analyze_existing_card(Path(smpinfo_file))
-            stats = analysis["sample_stats"]
-            lines = [
-                f"Populated slots: {stats['populated_slots']}/{stats['total_slots']}",
-                f"Bank C: {stats['bank_c_populated']}/8",
-                f"Bank D: {stats['bank_d_populated']}/8",
-                f"Mono: {stats['mono_slots']}  Stereo: {stats['stereo_slots']}",
-                "",
-                "Populated sample slots:",
-                *analysis["sample_slots"],
-            ]
-            if analysis["ptninfo_exists"]:
-                lines.extend(
-                    [
-                        "",
-                        f"Active patterns: {analysis['pattern_active_count']}/16",
-                        *analysis["pattern_slots"],
-                    ]
-                )
-            messagebox.showinfo("Card Analysis", "\n".join(lines))
-            self.update_status("Card analysis complete")
-        except Exception as exc:
-            messagebox.showerror("Analyse Existing Card", str(exc))
-
-    def on_archive_card_as_song(self):
-        card_dir = filedialog.askdirectory(title="Select SmartMedia Card Directory")
-        if not card_dir:
-            return
-
-        song_name = simpledialog.askstring("Archive Card", "Song name:")
-        if not song_name:
-            return
-
-        artist = simpledialog.askstring("Archive Card", "Artist (optional):") or "Unknown"
-        description = simpledialog.askstring("Archive Card", "Description (optional):") or ""
-
-        default_cards = self.get_library_paths()["cards"]
-        destination_root = filedialog.askdirectory(title="Select Song Archive Root", initialdir=str(default_cards))
-        destination = Path(destination_root) if destination_root else default_cards
-
-        try:
-            archived = archive_card_as_song(Path(card_dir), song_name, artist, description, destination)
-            self.update_status(f"Archived song: {song_name}")
-            messagebox.showinfo(
-                "Archive Complete",
-                f"Saved to: {archived['song_dir']}\n"
-                f"Copied files: {len(archived['copied_files'])}\n"
-                f"Samples: {archived['sample_count']}\n"
-                f"Patterns: {'Yes' if archived['has_patterns'] else 'No'}",
-            )
-        except Exception as exc:
-            messagebox.showerror("Archive Card", str(exc))
-
-    def on_show_shortcuts(self):
-        """Show keyboard shortcuts"""
-        dialog = tk.Toplevel(self.root)
-        dialog.title("Keyboard Shortcuts")
-        dialog.geometry("520x620")
-        dialog.resizable(True, True)
-        dialog.transient(self.root)
-        dialog.grab_set()
-        dialog.configure(bg="#000000")
-
-        canvas = tk.Canvas(dialog, bg="#000000", highlightthickness=0)
-        scrollbar = ttk.Scrollbar(dialog, orient=tk.VERTICAL, command=canvas.yview)
-        canvas.configure(yscrollcommand=scrollbar.set)
-        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-
-        outer = tk.Frame(canvas, bg="#000000", padx=16, pady=12)
-        canvas_window = canvas.create_window((0, 0), window=outer, anchor=tk.NW)
-
-        def on_frame_configure(_event):
-            canvas.configure(scrollregion=canvas.bbox("all"))
-        def on_canvas_configure(event):
-            canvas.itemconfig(canvas_window, width=event.width)
-        outer.bind("<Configure>", on_frame_configure)
-        canvas.bind("<Configure>", on_canvas_configure)
-
-        sections = [
-            ("FILE", [
-                ("Ctrl+N",        "New Pattern"),
-                ("Ctrl+O",        "Open Pattern"),
-                ("Ctrl+S",        "Save"),
-                ("Ctrl+Shift+S",  "Save As"),
-                ("Ctrl+Shift+L",  "Home Launcher"),
-                ("Ctrl+Q",        "Exit"),
-            ]),
-            ("EDIT", [
-                ("Ctrl+Z",        "Undo"),
-                ("Ctrl+Shift+Z",  "Redo"),
-                ("Ctrl+A",        "Select All"),
-                ("D / Del / Bksp","Delete Selected"),
-                ("Right-Click",   "Delete Event"),
-                ("[",             "Decrease Velocity"),
-                ("]",             "Increase Velocity"),
-                ("Ctrl+Shift+C",  "Copy Pattern"),
-                ("Ctrl+Shift+V",  "Paste Pattern"),
-            ]),
-            ("VIEW", [
-                ("Ctrl++",        "Zoom In"),
-                ("Ctrl+-",        "Zoom Out"),
-                ("Ctrl+0",        "Reset Zoom"),
-            ]),
-            ("NAVIGATION", [
-                ("Ctrl+Left",     "Previous Pattern"),
-                ("Ctrl+Right",    "Next Pattern"),
-            ]),
-            ("EDIT MODES", [
-                ("Draw",          "Click to add notes, drag to move, right-click to delete"),
-                ("Select",        "Click to select, drag to create selection rectangle"),
-                ("Erase",         "Click to delete notes"),
-            ]),
-        ]
-
-        row = 0
-        for section_name, items in sections:
-            tk.Label(
-                outer, text=section_name,
-                font=("", 9, "bold"), bg="#000000", fg="#888888", anchor="w",
-            ).grid(row=row, column=0, columnspan=2, sticky="w", pady=(10 if row > 0 else 0, 3))
-            row += 1
-            for key, desc in items:
-                tk.Label(
-                    outer, text=key,
-                    font=("TkFixedFont", 10), bg="#000000", fg="#ffffff", anchor="w", width=17,
-                ).grid(row=row, column=0, sticky="w", padx=(10, 0))
-                tk.Label(
-                    outer, text=desc,
-                    font=("TkFixedFont", 10), bg="#000000", fg="#cccccc", anchor="w",
-                ).grid(row=row, column=1, sticky="w")
-                row += 1
-
-
-    def on_help_quick_start(self):
-        """Show quick-start guide for beta users."""
-        quick_start = """Dr. Sidekick — Quick Start
-
-Welcome! Here's everything you need to get going.
-
-
-1. Program a Pattern
-   Head to Home -> Edit Patterns (or just press Ctrl+Shift+L to open the launcher).
-   Pick a pattern slot (C1–D8), switch to Draw mode, and click the pad rows to
-   place your hits. Drag to move them, right-click to delete.
-   When you're happy, hit Ctrl+S to save.
-
-   You can also import your own MIDI file via File -> Import MIDI File,
-   and apply a groove using Patterns -> Add Groove Pattern.
-
-
-2. Load Samples onto Your Card
-   Got a folder of WAVs? Go to Samples -> Quick Import WAV Folder and point
-   it at your folder. Dr. Sidekick handles the conversion and drops everything
-   into Cards/BOSS DATA_OUTGOING ready to load onto the SP-303.
-
-   If you have more than 8 samples, they'll be split into BANK_LOAD_01,
-   BANK_LOAD_02 etc. — just load one bank at a time on the device.
-
-
-3. Convert an MPC1000 Program
-   Got an MPC1000 .pgm file and its WAV samples? Go to
-   Samples -> Convert MPC1000 Program (.pgm) and select the .pgm file.
-   Dr. Sidekick finds the WAVs automatically (they're usually in the same
-   folder), maps all 64 pads to SP-303 banks, applies the same 110ms padding
-   and format fixes as Quick Import, and saves the result as a new virtual
-   card named after the .pgm file in SmartMedia-Library/Cards/.
-
-   Load the BANK_LOAD folders onto your SP-303 one at a time.
-
-
-4. Reassign Pads (Sample Manager)
-   Want to change which sample lives on which pad? Go to
-   Samples -> Sample Manager, load your card setup, make your changes,
-   then hit Write Changes to Card.
-
-   Tip: always back up first — use Backup Card before making any changes.
-   If something doesn't look right, Restore Backup has you covered.
-
-
-First time? Start small.
-   Load your card setup, reassign just one pad, write to card, eject safely,
-   and check it on the hardware before going further.
-"""
-        self.show_text_dialog("Quick Start", quick_start, geometry="980x580")
-
-    def on_help_workflow_examples(self):
-        """Show real-world workflow examples."""
-        examples = """WORKFLOW EXAMPLES
-
-
-─────────────────────────────────────────────────────────────
-Example 1: Load a Kit and Program a Pattern from Scratch
-─────────────────────────────────────────────────────────────
-
-Goal: Get your own samples onto the SP-303 and program a beat
-      ready to play back on the hardware.
-
-Step 1 — Load your samples onto the card.
-  Samples -> Quick Import WAV Folder -> select your kit folder.
-  Files are prepared in SmartMedia-Library/Cards/BOSS DATA_OUTGOING.
-  If more than 8 WAVs, load BANK_LOAD_01 first, then BANK_LOAD_02
-  on the device. Samples land on pads A1–D8 in file order.
-
-Step 2 — Program the pattern.
-  Home -> Edit Patterns. Select a pattern slot (C1–D8).
-  Switch to Draw mode. Click pad rows to place hits.
-  Drag to move. Right-click to delete.
-  Set bar length with the Pattern Length spinner.
-  Adjust velocity by selecting notes and using [ / ] keys.
-
-  Alternatively, import your own MIDI file:
-  File -> Import MIDI File -> select your file.
-  Review events in the editor and adjust as needed.
-
-  Optionally apply a groove to the pattern:
-  Patterns -> Add Groove Pattern -> select your groove file.
-
-Step 3 — Save and load onto the SP-303.
-  File -> Save (Ctrl+S).
-  Eject the card safely, insert into SP-303, and play.
-
-Note: A library of example MIDI patterns and grooves is planned for a future release.
-
-
-─────────────────────────────────────────────────────────────
-Example 2: Convert an MPC1000 Kit to SP-303
-─────────────────────────────────────────────────────────────
-
-Goal: Bring an MPC1000 drum program straight onto the SP-303,
-      preserving the original pad layout as closely as possible.
-
-Step 1 — Samples -> Convert MPC1000 Program (.pgm).
-  Select the .pgm file. If the WAV samples are in the same folder
-  (or a subfolder), no further prompt appears.
-  If WAVs live elsewhere, a folder picker opens.
-
-Step 2 — Review the results dialog.
-  Each bank (A–H) shows which WAV landed on which SMPL slot.
-  NOT FOUND entries mean the .pgm referenced a sample name that
-  wasn't matched in the WAV folder — check spelling or relocate.
-
-Step 3 — Load onto the SP-303.
-  Open SmartMedia-Library/Cards/<pgm name> in Finder.
-  Copy BANK_LOAD_01 contents (SMPL0001–SMPL0008.WAV) to your card.
-  On the SP-303 select the target bank and run Import.
-  Repeat for each BANK_LOAD folder.
-
-Note: Each .pgm gets its own card named after the program file.
-  Re-running with the same .pgm overwrites that card only.
-
-
-─────────────────────────────────────────────────────────────
-Example 3: Reorganize a Card Without Losing Anything
-─────────────────────────────────────────────────────────────
-
-Goal: Safely reassign pads and shuffle patterns on an existing card.
-
-Step 1 — Back up first.
-  Samples -> Sample Manager -> Backup Card.
-  A backup is created in Backup/ next to SmartMedia-Library.
-
-Step 2 — Load the current card setup.
-  Samples -> Sample Manager -> Load Card Setup.
-  All current pad assignments appear in the table.
-
-Step 3 — Reassign pads.
-  Select a pad row, then use Assign WAV/SP0 to swap samples.
-  The status bar confirms every change.
-
-Step 4 — Remap or exchange patterns.
-  Open the pattern editor. Use Edit -> Copy Pattern / Paste Pattern
-  to move patterns between slots without re-programming.
-
-Step 5 — Write changes.
-  Samples -> Sample Manager -> Write Changes to Card.
-  Eject safely and verify on device.
-  If anything is wrong, restore from the backup created in Step 1.
-"""
-        self.show_text_dialog("Workflow Examples", examples, geometry="980x560")
-
-    def on_help_faq(self):
-        """Show FAQ and troubleshooting notes for beta users."""
-        faq = """FAQ / Troubleshooting (Beta)
-
-Q: I selected a single WAV file in Quick Import. Is that valid?
-A: Yes. The app uses that file's parent folder automatically.
-
-Q: Why do I get BANK_LOAD_01 folders?
-A: More than 8 WAV files were found. SP-303 loads one bank (8 samples) at a time.
-
-Q: Where are Quick Import files written?
-A: /Volumes/BOSS DATA or SmartMedia-Library/Cards/BOSS DATA_OUTGOING.
-
-Q: Existing WAVs disappeared from BOSS DATA_OUTGOING.
-A: They are archived into the subfolder wav_archive_YYYYMMDD_HHMMSS.
-
-Q: Write Changes completed, but device did not reflect changes.
-A: Most common causes:
-- Card not ejected safely before inserting into SP-303
-- Wrong target output path selected check in both /Volumes/BOSS DATA and Cards/BOSS DATA_OUTGOING/
-
-Q: I used Convert MPC1000 Program and some pads say NOT FOUND.
-A: The .pgm stores sample names without file extensions, and matching is
-   done by filename stem. Check that your WAV filenames match the names
-   stored in the .pgm (case-insensitive partial matches are tried too).
-   If WAVs are in a different folder, re-run and point to the correct folder
-   when the folder picker appears.
-
-Q: Convert MPC1000 Program only shows a few banks — where are the rest?
-A: Only banks that contain at least one matched sample are written.
-   Empty banks are skipped. Pads with no assignment or unresolved samples
-   are listed per-slot in the results dialog.
-
-Q: I ran Convert MPC1000 twice with different programs and both are there.
-A: Correct — each .pgm gets its own card named after the program file.
-   Re-running with the same .pgm overwrites that card only.
-
-"""
-        self.show_text_dialog("FAQ / Troubleshooting", faq, geometry="1024x680")
-
-    def on_check_for_update(self):
-        """Check GitHub for the latest release."""
-        api_url = "https://api.github.com/repos/OneCoinOnePlay/dr-sidekick/releases/latest"
-        current_version = APP_VERSION
-
-        def parse_version(raw: str) -> Tuple[int, ...]:
-            raw = raw.strip().lstrip("vV")
-            parts: List[int] = []
-            for token in raw.split("."):
-                digits = "".join(ch for ch in token if ch.isdigit())
-                if not digits:
-                    break
-                parts.append(int(digits))
-            return tuple(parts) if parts else (0,)
-
-        def show_result(title: str, msg: str):
-            self.root.after(0, lambda: (messagebox.showinfo(title, msg), self.update_status("Ready")))
-
-        def do_check():
-            try:
-                req = urllib.request.Request(
-                    api_url,
-                    headers={
-                        "Accept": "application/vnd.github+json",
-                        "User-Agent": "Dr-Sidekick-Update-Check",
-                    },
-                )
-                with urllib.request.urlopen(req, timeout=6) as response:
-                    payload = json.loads(response.read().decode("utf-8"))
-
-                latest_tag = str(payload.get("tag_name", "")).strip()
-                latest_name = str(payload.get("name", "")).strip()
-                latest_version_label = latest_tag or latest_name or "unknown"
-                release_url = str(payload.get("html_url", "https://github.com/OneCoinOnePlay/dr-sidekick/releases"))
-
-                if parse_version(latest_version_label) > parse_version(current_version):
-                    show_result(
-                        "Update Available",
-                        f"Current version: {current_version}\n"
-                        f"Latest version: {latest_version_label}\n\n"
-                        f"Download:\n{release_url}",
-                    )
-                else:
-                    show_result(
-                        "Up To Date",
-                        f"Dr. Sidekick is up to date.\n\nCurrent version: {current_version}",
-                    )
-            except (urllib.error.URLError, TimeoutError, ValueError, json.JSONDecodeError):
-                show_result(
-                    "Check for Update",
-                    "Unable to check updates right now.\n\n"
-                    f"Current version: {current_version}\n"
-                    "Manual check:\nhttps://github.com/OneCoinOnePlay/dr-sidekick/releases",
-                )
-
-        self.update_status("Checking for updates...")
-        threading.Thread(target=do_check, daemon=True).start()
-
-    def on_view_log(self):
-        dialog = tk.Toplevel(self.root)
-        dialog.title("Session Log")
-        dialog.geometry("900x540")
-        dialog.transient(self.root)
-        dialog.configure(bg="#000000")
-
-        frame = ttk.Frame(dialog, padding=10)
-        frame.pack(fill=tk.BOTH, expand=True)
-
-        text = tk.Text(
-            frame, wrap=tk.NONE, bg="#000000", fg="#cccccc",
-            insertbackground="#ffffff", relief=tk.FLAT, highlightthickness=0,
-            font=("Courier", 10),
-        )
-        scroll_y = ttk.Scrollbar(frame, orient=tk.VERTICAL, command=text.yview)
-        scroll_x = ttk.Scrollbar(frame, orient=tk.HORIZONTAL, command=text.xview)
-        text.configure(yscrollcommand=scroll_y.set, xscrollcommand=scroll_x.set)
-        scroll_y.pack(side=tk.RIGHT, fill=tk.Y)
-        scroll_x.pack(side=tk.BOTTOM, fill=tk.X)
-        text.pack(fill=tk.BOTH, expand=True)
-
-        try:
-            content = _LOG_PATH.read_text(encoding="utf-8") if _LOG_PATH.exists() else "(no log file yet)"
-        except Exception as exc:
-            content = f"(could not read log: {exc})"
-
-        text.insert("1.0", content)
-        text.configure(state=tk.DISABLED)
-        text.see(tk.END)
-
-        ttk.Label(frame, text=str(_LOG_PATH), font=("Courier", 9)).pack(anchor=tk.W, pady=(6, 0))
-
-    def on_about(self):
-        """Show about dialog"""
-        about = tk.Toplevel(self.root)
-        about.title("About Dr. Sidekick")
-        about.geometry("620x340")
-        about.resizable(False, False)
-        about.transient(self.root)
-        about.grab_set()
-        about.configure(bg="#000000")
-
-        container = tk.Frame(about, bg="#000000", padx=16, pady=16)
-        container.pack(fill=tk.BOTH, expand=True)
-
-        tk.Label(
-            container,
-            text=f"Dr. Sidekick v{APP_VERSION}",
-            font=("", 14, "bold"),
-            bg="#000000",
-            fg="#ffffff",
-            anchor="w",
-            justify=tk.LEFT,
-        ).pack(anchor=tk.W)
-
-        tk.Label(
-            container,
-            text="Standalone graphical pattern editor and SmartMedia librarian for the BOSS Dr. Sample SP-303",
-            wraplength=580,
-            justify=tk.LEFT,
-            bg="#000000",
-            fg="#ffffff",
-            anchor="w",
-        ).pack(anchor=tk.W, pady=(8, 10))
-
-        contacts = (
-            "Author: One Coin One Play\n\n"
-            "github.com/OneCoinOnePlay\n"
-            "soundcloud.com/one_coin_one_play\n"
-            "instagram.com/one_coin_one_play\n"
-            "linkedin.com/in/onecoinoneplay\n"
-            "x.com/OneCoinOnePlay\n"
-            "youtube.com/@1coin1play"
-        )
-        tk.Label(
-            container,
-            text=contacts,
-            justify=tk.LEFT,
-            bg="#000000",
-            fg="#ffffff",
-            anchor="w",
-        ).pack(anchor=tk.W, pady=(0, 14))
-
-        tk.Label(
-            container,
-            text="Disclaimer: Dr. Sidekick is an independent community project and is not affiliated with, endorsed by, or supported by Roland Corporation or BOSS.",
-            wraplength=580,
-            justify=tk.LEFT,
-            bg="#000000",
-            fg="#cccccc",
-            anchor="w",
-        ).pack(anchor=tk.W)
-
-    def load_config(self):
-        """Load app config from JSON file, migrating old recent files if present."""
-        self.config: dict = {
-            "device": "BOSS Dr. Sample SP-303",
-            "card_mount_path": "",
-            "write_to_card": True,
-            "recent_files": [],
-        }
-        config_path = Path(__file__).parent / "dr_sidekick_config.json"
-        if config_path.exists():
-            try:
-                with open(config_path, "r", encoding="utf-8") as f:
-                    saved = json.load(f)
-                self.config.update(saved)
-            except Exception:
-                pass
-        # Migrate old recent files file
-        old_path = Path.home() / ".dr_sidekick_recent"
-        if old_path.exists() and not self.config.get("recent_files"):
-            try:
-                lines = old_path.read_text(encoding="utf-8").splitlines()
-                self.config["recent_files"] = [l.strip() for l in lines if l.strip()]
-                self.save_config()
-                old_path.unlink(missing_ok=True)
-            except Exception:
-                pass
-
-    def save_config(self):
-        """Save app config to JSON file."""
-        config_path = Path(__file__).parent / "dr_sidekick_config.json"
-        try:
-            with open(config_path, "w", encoding="utf-8") as f:
-                json.dump(self.config, f, indent=2)
-        except Exception:
-            pass
-
-    def get_card_mount_path(self) -> Path:
-        """Return configured card mount path or auto-detect."""
-        if sys.platform == "darwin":
-            preferred = Path("/Volumes/BOSS DATA")
-            if preferred.exists():
-                return preferred
-        config_val = self.config.get("card_mount_path", "")
-        if config_val:
-            return Path(config_val)
-        return self.get_library_paths()["outgoing"]
-
     def load_recent_files(self):
         """Load recent files from config."""
-        for line in self.config.get("recent_files", []):
+        for line in self.state.config.get("recent_files", []):
             path = Path(line)
             if path.exists():
                 self.recent_files.append(path)
 
     def save_recent_files(self):
         """Save recent files to config."""
-        self.config["recent_files"] = [str(p) for p in self.recent_files]
-        self.save_config()
+        self.state.config["recent_files"] = [str(p) for p in self.recent_files]
+        self.state.save_config()
 
     def add_recent_file(self, ptninfo_path: Path):
         """Add file to recent files list"""
@@ -7160,9 +7579,9 @@ def main():
     log.info("=" * 60)
     log.info("Dr. Sidekick %s started", APP_VERSION)
 
-    debug_mode = "--debug" in sys.argv[1:]
     root = TkinterDnD.Tk() if TKDND_AVAILABLE else tk.Tk()
-    app = SP303PatternEditor(root, debug_mode=debug_mode)
+    state = AppState()
+    SmartMediaLibraryWindow(root, state)
     root.mainloop()
     log.info("Dr. Sidekick session ended")
 
