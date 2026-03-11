@@ -8,9 +8,11 @@
 
 ---
 
-![Home and Pattern Editor](screenshots/home-pattern-editor.png)
+![SmartMedia Library](screenshots/1-smartmedia-library.png)
 
-![SmartMedia Manager](screenshots/smartmedia-manager.png)
+![Sample Manager](screenshots/2-sample-manager.png)
+
+![Pattern Manager](screenshots/3-pattern-manager.png)
 
 ---
 
