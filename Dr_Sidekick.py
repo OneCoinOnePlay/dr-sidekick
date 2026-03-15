@@ -802,7 +802,8 @@ class SlotRecord:
     sample_length_bytes: int  # Actual audio data length
     loop_point_bytes: int  # Loop point or = length for no loop
     is_stereo: bool
-    params_word: int = SP303_DEFAULT_PARAMS  # 16-bit clock divider; sample_rate = 37_500_000 / params_word
+    params_word: int = SP303_DEFAULT_PARAMS  # 16-bit clock divider; sample_rate = 37,500_000 / params_word
+    sample_rate: int = 31250            # Derived hardware rate
     is_gate: bool = False              # Gate playback mode (byte 0x25)
     is_loop: bool = False              # Loop playback mode (byte 0x26)
     is_reverse: bool = False           # Reverse playback mode (byte 0x27)
@@ -898,6 +899,8 @@ class SlotRecord:
         loop_point = struct.unpack('>I', data[16:20])[0]
         # Preserve params_word (bytes 28-29 = first 16-bit clock divider) for round-trip fidelity
         params_word = struct.unpack('>H', data[28:30])[0] or SP303_DEFAULT_PARAMS
+        sample_rate = int(SP303_CLOCK_HZ / params_word)
+            
         is_stereo = data[36] == 0x01
         is_gate = data[37] == 0x01
         is_loop = data[38] == 0x01
@@ -909,6 +912,7 @@ class SlotRecord:
             loop_point_bytes=loop_point,
             is_stereo=is_stereo,
             params_word=params_word,
+            sample_rate=sample_rate,
             is_gate=is_gate,
             is_loop=is_loop,
             is_reverse=is_reverse,
@@ -954,10 +958,11 @@ class PadMapping:
         return cls(pad_index=pad_number - 1)
 
 
-# ── SP-303 RDAC MT1 decoder ───────────────────────────────────────────────────
+# ── SP-303 RDAC MT1/MT2 decoder ───────────────────────────────────────────────
 # Ported from RDAC decode research by Randy Gordon (randy@integrand.com), LGPL 2006.
-# Decodes SP-303 .SP0 sample files (RDAC MT1 compression) to raw 16-bit PCM.
+# Updated 2026: Improved with Adaptive Alignment and 24-bit state tracking.
 
+# Pattern lookup table: index = (block[0] & 0xf0) | (block[2] >> 4) → 0..36
 _SP303_RDAC_PATTERNS = [
     0, 0, 0, 0,  1, 1, 1, 1,  2, 2, 2, 2,  3, 3, 3, 3,
     0, 0, 0, 0,  1, 1, 1, 1,  2, 2, 2, 2,  3, 3, 3, 3,
@@ -978,6 +983,7 @@ _SP303_RDAC_PATTERNS = [
 ]
 
 def _sp303_p(s): return s.replace(' ', '')
+# MT1 Patterns (16-byte blocks)
 _SP303_PAT_A  = _sp303_p("ppp88888 88888888 pppggggg gggggggg 87777776 66666655 gffffffe eeeeeedd"
                           " 55554444 44444333 ddddcccc cccccbbb 33322222 22111111 bbbaaaaa aa999999")
 _SP303_PAT_B  = _sp303_p("pp888888 88888887 ppgggggg gggggggf 77777666 66666555 fffffeee eeeeeddd"
@@ -992,12 +998,28 @@ _SP303_PAT_E  = _sp303_p("pppp8888 88888877 ppppgggg ggggggff 77776666 66665555 
                           " 55444444 44443333 ddcccccc ccccbbbb 33222222 22111111 bbaaaaaa aa999999")
 _SP303_PAT_F  = _sp303_p("pppp8888 88887777 ppppgggg ggggffff 77766666 66655555 fffeeeee eeeddddd"
                           " 55444444 44333333 ddcccccc ccbbbbbb 32222222 21111111 baaaaaaa a9999999")
+_SP303_PAT_B4 = _sp303_p("pppp8888 88888887 ppppgggg gggggggf 77777666 66665555 ffffffee eeeeeddd"
+                          " 55554444 44433333 ddddcccc cccbbbbb 33222222 21111111 bbaaaaaa a9999999")
 
 _SP303_SYM = {c: i for i, c in enumerate('123456789abcdefg')}
 _SP303_SYM['p'] = -1
 
+# Firmware shift LUT at 0xB4C0 — 64 entries indexed by block[0] >> 2.
+_SP303_FW_SHIFT_LUT64 = [
+    19, 19, 19, 18, 18, 18, 17, 17, 16, 16, 16, 15, 15, 15, 14, 14,
+    13, 13, 13, 12, 12, 12, 11, 11, 10, 10, 10,  9,  9,  9,  8,  8,
+     7,  7,  7,  6,  6,  5,  5,  5,  4,  4,  4,  3,  3,  2,  2,  2,
+     1,  1,  1,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+]
+
 
 def _sp303_apply_pattern(block, pattern):
+    """Extract 16 symbols from a 16-byte block according to pattern.
+    Each symbol is sign-extended at its natural bit depth — no alignment.
+    Residuals stay smaller than anchors (they are corrections in the
+    hierarchical DPCM scheme, not full-scale values).
+    Returns (symbols, max_depth) where max_depth is the largest bit count.
+    """
     out, out_pos = [0] * 16, [0] * 16
     for in_pos in range(15, -1, -1):
         byte_pat = pattern[in_pos * 8: in_pos * 8 + 8]
@@ -1009,17 +1031,25 @@ def _sp303_apply_pattern(block, pattern):
             if (byte_val >> bit_pos) & 1:
                 out[out_idx] |= 1 << out_pos[out_idx]
             out_pos[out_idx] += 1
+    max_depth = max(out_pos) if any(out_pos) else 1
     for i in range(16):
         if out_pos[i] > 0:
             mask = 1 << (out_pos[i] - 1)
             out[i] = -(out[i] & mask) | out[i]
-    return out
+    return out, max_depth
 
 
 def _sp303_shift_round(out, pos):
-    half = 1 << (pos - 1)
-    for i in range(16):
-        out[i] = (out[i] << pos) | half
+    if pos == 0:
+        return
+    if pos > 0:
+        half = 1 << (pos - 1)
+        for i in range(16):
+            out[i] = (out[i] << pos) | half
+    else:
+        rsh = -pos
+        for i in range(16):
+            out[i] >>= rsh
 
 
 def _sp303_interp(a, b):
@@ -1053,45 +1083,49 @@ def _sp303_interp8(d0, out):
     out[12] += _sp303_interp(out[11], out[13]); out[14] += _sp303_interp(out[13], out[15])
 
 
-def _sp303_clamp16(out):
-    for i in range(16):
-        out[i] = max(-32768, min(32767, out[i]))
-
-
 def _sp303_decode_mt1(d0: int, block: bytes) -> List[int]:
-    """Decode one 16-byte MT1 RDAC block. d0 is the last sample of the previous block."""
+    """Decode one 16-byte MT1 RDAC block to high-precision (24-bit internal) samples."""
     p = _SP303_RDAC_PATTERNS[(block[0] & 0xf0) | ((block[2] & 0xf0) >> 4)]
-    out = [0] * 16
-    if   p == 2:  out = _sp303_apply_pattern(block, _SP303_PAT_B);                            _sp303_interp2(d0, out)
-    elif p == 3:  out = _sp303_apply_pattern(block, _SP303_PAT_B);  _sp303_shift_round(out, 1); _sp303_interp2(d0, out)
-    elif p == 4:  out = _sp303_apply_pattern(block, _SP303_PAT_B);  _sp303_shift_round(out, 2); _sp303_interp2(d0, out)
-    elif p == 5:  out = _sp303_apply_pattern(block, _SP303_PAT_B);  _sp303_shift_round(out, 3); _sp303_interp2(d0, out)
-    elif p == 6:  out = _sp303_apply_pattern(block, _SP303_PAT_D);  _sp303_shift_round(out, 2); _sp303_interp4(d0, out)
-    elif p == 7:  out = _sp303_apply_pattern(block, _SP303_PAT_D);  _sp303_shift_round(out, 3); _sp303_interp4(d0, out)
-    elif p == 8:  out = _sp303_apply_pattern(block, _SP303_PAT_D);  _sp303_shift_round(out, 4); _sp303_interp4(d0, out)
-    elif p == 9:  out = _sp303_apply_pattern(block, _SP303_PAT_D);  _sp303_shift_round(out, 5); _sp303_interp4(d0, out)
-    elif p == 10: out = _sp303_apply_pattern(block, _SP303_PAT_D);  _sp303_shift_round(out, 6); _sp303_interp4(d0, out)
-    elif p == 11: out = _sp303_apply_pattern(block, _SP303_PAT_D);  _sp303_shift_round(out, 7); _sp303_interp4(d0, out)
-    elif p == 15: out = _sp303_apply_pattern(block, _SP303_PAT_A);                            _sp303_interp2(d0, out)
-    elif p == 16: out = _sp303_apply_pattern(block, _SP303_PAT_A);  _sp303_shift_round(out, 1); _sp303_interp2(d0, out)
-    elif p == 17: out = _sp303_apply_pattern(block, _SP303_PAT_A);  _sp303_shift_round(out, 2); _sp303_interp2(d0, out)
-    elif p == 18: out = _sp303_apply_pattern(block, _SP303_PAT_B3); _sp303_shift_round(out, 4); _sp303_interp2(d0, out)
-    elif p == 19: out = _sp303_apply_pattern(block, _SP303_PAT_C);                            _sp303_interp2(d0, out)
-    elif p == 20: out = _sp303_apply_pattern(block, _SP303_PAT_C);  _sp303_shift_round(out, 1); _sp303_interp2(d0, out)
-    elif p == 21: out = _sp303_apply_pattern(block, _SP303_PAT_C);  _sp303_shift_round(out, 2); _sp303_interp2(d0, out)
-    elif p == 22: out = _sp303_apply_pattern(block, _SP303_PAT_C);  _sp303_shift_round(out, 3); _sp303_interp2(d0, out)
-    elif p == 23: out = _sp303_apply_pattern(block, _SP303_PAT_C);  _sp303_shift_round(out, 4); _sp303_interp2(d0, out)
-    elif p == 24: out = _sp303_apply_pattern(block, _SP303_PAT_C);  _sp303_shift_round(out, 5); _sp303_interp2(d0, out)
-    elif p == 25: out = _sp303_apply_pattern(block, _SP303_PAT_F);  _sp303_shift_round(out, 4); _sp303_interp8(d0, out)
-    elif p == 26: out = _sp303_apply_pattern(block, _SP303_PAT_F);  _sp303_shift_round(out, 5); _sp303_interp8(d0, out)
-    elif p == 27: out = _sp303_apply_pattern(block, _SP303_PAT_F);  _sp303_shift_round(out, 6); _sp303_interp8(d0, out)
-    elif p == 28: out = _sp303_apply_pattern(block, _SP303_PAT_F);  _sp303_shift_round(out, 7); _sp303_interp8(d0, out)
-    elif p == 29: out = _sp303_apply_pattern(block, _SP303_PAT_F);  _sp303_shift_round(out, 8); _sp303_interp8(d0, out)
+    lut_val = _SP303_FW_SHIFT_LUT64[block[0] >> 2]
+    
+    pat_map = {
+        0:  (_SP303_PAT_B,  _sp303_interp2), 1:  (_SP303_PAT_B,  _sp303_interp2),
+        2:  (_SP303_PAT_B,  _sp303_interp2), 3:  (_SP303_PAT_B,  _sp303_interp2),
+        4:  (_SP303_PAT_B,  _sp303_interp2), 5:  (_SP303_PAT_B,  _sp303_interp2),
+        6:  (_SP303_PAT_D,  _sp303_interp4), 7:  (_SP303_PAT_D,  _sp303_interp4),
+        8:  (_SP303_PAT_D,  _sp303_interp4), 9:  (_SP303_PAT_D,  _sp303_interp4),
+        10: (_SP303_PAT_D,  _sp303_interp4), 11: (_SP303_PAT_D,  _sp303_interp4),
+        12: (_SP303_PAT_A,  _sp303_interp2), 13: (_SP303_PAT_A,  _sp303_interp2),
+        14: (_SP303_PAT_A,  _sp303_interp2), 15: (_SP303_PAT_A,  _sp303_interp2),
+        16: (_SP303_PAT_A,  _sp303_interp2), 17: (_SP303_PAT_A,  _sp303_interp2),
+        18: (_SP303_PAT_B3, _sp303_interp2),
+        19: (_SP303_PAT_C,  _sp303_interp2), 20: (_SP303_PAT_C,  _sp303_interp2),
+        21: (_SP303_PAT_C,  _sp303_interp2), 22: (_SP303_PAT_C,  _sp303_interp2),
+        23: (_SP303_PAT_C,  _sp303_interp2), 24: (_SP303_PAT_C,  _sp303_interp2),
+        25: (_SP303_PAT_F,  _sp303_interp8), 26: (_SP303_PAT_F,  _sp303_interp8),
+        27: (_SP303_PAT_F,  _sp303_interp8), 28: (_SP303_PAT_F,  _sp303_interp8),
+        29: (_SP303_PAT_F,  _sp303_interp8),
+        30: (_SP303_PAT_F,  None),
+        31: (_SP303_PAT_E,  _sp303_interp4),
+        32: (_SP303_PAT_B4, _sp303_interp2), 33: (_SP303_PAT_B4, _sp303_interp2),
+        34: (_SP303_PAT_B4, _sp303_interp2), 35: (_SP303_PAT_B4, _sp303_interp2),
+        36: (_SP303_PAT_B4, _sp303_interp2)
+    }
+    
+    if p not in pat_map:
+        return [0] * 16
+        
+    pat_str, interp_func = pat_map[p]
+    out, max_depth = _sp303_apply_pattern(block, pat_str)
+    
+    # Ensure max_depth is at least 1 to avoid division by zero/weird shifts
+    max_depth = max(1, max_depth)
+    shift = (23 - max_depth) - lut_val
+    _sp303_shift_round(out, shift)
+    if interp_func:
+        interp_func(d0, out)
     elif p == 30:
-        out = _sp303_apply_pattern(block, _SP303_PAT_F); _sp303_shift_round(out, 8)
         for i in range(0, 16, 2): out[i] <<= 1
-    elif p == 31: out = _sp303_apply_pattern(block, _SP303_PAT_E);  _sp303_shift_round(out, 6); _sp303_interp4(d0, out)
-    _sp303_clamp16(out)
     return out
 
 
@@ -1099,30 +1133,30 @@ def sp303_decode_sp0(path: str) -> List[int]:
     """Decode an SP0 file to a flat list of 16-bit PCM samples (32000 Hz native)."""
     file_size = os.path.getsize(path)
     samples: List[int] = []
-    d0 = 0
+    d0 = 0  # 24-bit internal predictor
     with open(path, 'rb') as f:
         for _ in range(file_size // 16):
             block = f.read(16)
             if len(block) < 16:
                 break
             chunk = _sp303_decode_mt1(d0, block)
-            samples.extend(chunk)
-            d0 = chunk[15]
+            chunk_16 = [max(-32768, min(32767, s >> 8)) for s in chunk]
+            samples.extend(chunk_16)
+            d0 = chunk[15]  # Preserve high-precision predictor
     return samples
 
 
 def sp303_write_wav(f, num_samples: int, sample_rate: int, num_channels: int = 1) -> None:
     """Write a 16-bit PCM WAV header then expect the caller to write the sample data."""
     num_bytes = num_samples * 2 * num_channels
-    f.write(b'RIFF'); f.write(struct.pack('<I', num_bytes + 38))
-    f.write(b'WAVE'); f.write(b'fmt '); f.write(struct.pack('<I', 18))
+    f.write(b'RIFF'); f.write(struct.pack('<I', num_bytes + 36))
+    f.write(b'WAVE'); f.write(b'fmt '); f.write(struct.pack('<I', 16))
     f.write(struct.pack('<H', 1))                          # PCM
     f.write(struct.pack('<H', num_channels))
     f.write(struct.pack('<I', sample_rate))
     f.write(struct.pack('<I', sample_rate * 2 * num_channels))
     f.write(struct.pack('<H', 2 * num_channels))
     f.write(struct.pack('<H', 16))                         # bits per sample
-    f.write(struct.pack('<H', 0))                          # extra params
     f.write(b'data'); f.write(struct.pack('<I', num_bytes))
 
 
@@ -2251,7 +2285,7 @@ SLOT_COUNT = 16
 DEFAULT_PATTERN_LENGTH_BARS = 4  # Default pattern length
 MAX_PATTERN_LENGTH_BARS = 99  # SP-303 hardware maximum
 TUPLE_ZONE_MAX_BYTES = 0x272 - 0x70  # PTNDATA event payload capacity per pattern slot
-APP_VERSION = "0.4.0"
+APP_VERSION = "0.5.0"
 
 
 def load_midi_notes_by_channel(midi_path: str) -> Tuple[Dict[int, List[Tuple[int, int, int]]], int]:
@@ -6845,9 +6879,9 @@ Velocity:
                     slot_record = smpinfo.slots[slot]
                     if slot_record.is_empty:
                         continue
-                    channels = 2 if slot_record.is_stereo else 1
-                    samples = slot_record.sample_length_bytes / (2 * channels)
-                    seconds = samples / 44100.0
+                    
+                    # Duration from SMPINFO: sample_length_bytes / 33075 Hz (= 44100 × ¾)
+                    seconds = slot_record.sample_length_bytes / 33075.0
                     duration_text = f"{seconds:.2f}s" if seconds >= 1.0 else f"{seconds * 1000.0:.1f}ms"
                     gate_state[slot] = slot_record.is_gate
                     loop_state[slot] = slot_record.is_loop
