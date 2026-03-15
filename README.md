@@ -35,11 +35,17 @@
 - Auto-pad samples to 110ms minimum
 - Reassign archived .SP0 samples to different pads
 - Mix archived samples with new imports
+- Preview archived SP0 samples with experimental RDAC decoding
+- Convert SP0 samples to WAV
 - Generates byte-perfect SMPINFO0.SP0 metadata
 
-**Quick Import WAV Folder** — prepare WAV sets for one-bank-at-a-time loading onto the SP-303
+**SmartMedia Library** — virtual card management
 
-**Pack Library** — catalog and load sample packs and groove sets *(coming soon)*
+- Create, rename, and organise virtual SmartMedia cards
+- Archive full card contents (SP0 samples + SMPINFO + patterns)
+- MPC1000 .pgm import for cross-device sample transfer
+
+**Quick Import WAV Folder** — prepare WAV sets for one-bank-at-a-time loading onto the SP-303
 
 **Backup / Restore** — create and restore full SP0 card backups
 
@@ -67,7 +73,10 @@ chmod +x Dr_Sidekick.py
 
 ## Status
 
-Beta. Core workflows are functional and have been tested against with SP-303 hardware.
+Beta. Core workflows are functional and have been tested against SP-303 hardware.
+
+RDAC audio decoding is experimental — samples are recognisable but noisy. Structural accuracy (pattern selection, bit extraction, hierarchical interpolation) is confirmed with 0.93 spectral correlation to hardware output.
+
 Please report issues at [github.com/OneCoinOnePlay/dr-sidekick/issues](https://github.com/OneCoinOnePlay/dr-sidekick/issues).
 
 ## File Format Notes
@@ -79,20 +88,19 @@ Dr. Sidekick reads and writes the SP-303's native SmartMedia card format:
 | `PTNDATA0.SP0` | Pattern event data (16 slots × 1024 bytes) |
 | `PTNINFO0.SP0` | Pattern metadata and slot mapping (64 bytes) |
 | `SMPINFO0.SP0` | Sample slot assignments (65 536 bytes) |
-| `SMPxxxxL/R.SP0` | Sample audio data |
+| `SMPxxxxL/R.SP0` | Sample audio data (RDAC MT1 compressed) |
 
-## User-Library
+## SmartMedia Library
 
-`User-Library/` holds local sample and groove assets:
+`SmartMedia-Library/` manages virtual cards and sample assets:
 
 ```
-User-Library/
-  BOSS DATA_INCOMING/   # staging area for card reads
-  BOSS DATA_OUTGOING/   # output for Quick Import WAV
-  Songs/
+SmartMedia-Library/
+  Cards/{card_name}/         # Virtual card contents (SP0 + metadata)
+  AutoSaves/{card_name}/     # Timestamped card snapshots
+  BOSS DATA_INCOMING/        # Staging area for card reads
+  BOSS DATA_OUTGOING/        # Output for Quick Import WAV
 ```
-
-The Pack Library indexes content here in `sp303_library_catalog.json`.
 
 ## Disclaimer
 
