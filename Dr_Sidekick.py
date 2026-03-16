@@ -39,8 +39,7 @@ except ImportError:
 
 from dr_sidekick import APP_VERSION
 from dr_sidekick.app_state import AppState
-from dr_sidekick.ui.library_window import SmartMediaLibraryWindow
-from dr_sidekick.ui.pattern_window import PatternManagerWindow
+from dr_sidekick.ui.app_controller import AppController
 
 def main():
     """Main entry point"""
@@ -62,7 +61,7 @@ def main():
 
     root = TkinterDnD.Tk() if TKDND_AVAILABLE else tk.Tk()
     state = AppState()
-    SmartMediaLibraryWindow(root, state)
+    AppController(root, state)
     root.mainloop()
     log.info("Dr. Sidekick session ended")
 
