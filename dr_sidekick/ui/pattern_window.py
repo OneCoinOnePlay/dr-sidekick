@@ -89,8 +89,6 @@ class PatternManagerWindow:
         self.root.bind("<Control-Shift-C>", lambda e: self.on_copy_slot())
         self.root.bind("<Control-Shift-V>", lambda e: self.on_paste_slot())
         self.root.bind("<Control-q>", lambda e: self.on_exit())
-        self.root.bind("<Control-Shift-L>", lambda e: self.on_smartmedia_library())
-        self.root.bind("<Control-Shift-l>", lambda e: self.on_smartmedia_library())
         self.root.bind("<d>", self.on_delete_key_root)
         self.root.bind("<D>", self.on_delete_key_root)
         self.root.bind("<Delete>", self.on_delete_key_root)
@@ -136,12 +134,6 @@ class PatternManagerWindow:
         # Recent files section (will be populated by update_recent_files_menu)
         self.recent_files_menu_start_index = self.file_menu.index("end") + 1
 
-        self.file_menu.add_separator()
-        self.file_menu.add_command(
-            label="SmartMedia Library...",
-            command=self.on_smartmedia_library,
-            accelerator="Ctrl+Shift+L",
-        )
         self.file_menu.add_separator()
         self.file_menu.add_command(label="Save", command=self.on_save, accelerator="Ctrl+S")
         self.file_menu.add_command(label="Save As...", command=self.on_save_as, accelerator="Ctrl+Shift+S")
@@ -203,13 +195,7 @@ class PatternManagerWindow:
         pattern_menu.add_separator()
         pattern_menu.add_command(label="Pattern Info", command=self.on_pattern_info)
 
-        # Card menu (migrated from CLI)
-        card_menu = tk.Menu(menubar, tearoff=0)
-        menubar.add_cascade(label="Samples", menu=card_menu)
-        card_menu.add_command(label="Open Sample Manager...", command=self.open_sample_manager)
-        card_menu.add_command(label="SmartMedia Library...", command=self.on_smartmedia_library)
         self.pattern_menu = pattern_menu
-        self.samples_menu = card_menu
 
         # Help menu
         help_menu = tk.Menu(menubar, tearoff=0)
@@ -249,7 +235,6 @@ class PatternManagerWindow:
                 ("Ctrl+O",        "Open Pattern"),
                 ("Ctrl+S",        "Save"),
                 ("Ctrl+Shift+S",  "Save As"),
-                ("Ctrl+Shift+L",  "SmartMedia Library"),
                 ("Ctrl+Q",        "Exit"),
             ]),
             ("EDIT", [
@@ -1548,11 +1533,6 @@ Velocity:
         button_row.pack(fill=tk.X, side=tk.BOTTOM)
         ttk.Button(button_row, text="Exchange", command=do_exchange).pack(side=tk.RIGHT)
         ttk.Button(button_row, text="Cancel", command=dialog.destroy).pack(side=tk.RIGHT, padx=(0, 8))
-
-    def on_smartmedia_library(self):
-        """Bring the SmartMedia Library window to the front."""
-        self.lib_win.root.deiconify()
-        self.lib_win.root.lift()
 
     def on_quick_import_card(self):
         run_quick_import_action(self)

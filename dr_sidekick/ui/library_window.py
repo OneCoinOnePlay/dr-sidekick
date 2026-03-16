@@ -136,6 +136,11 @@ class SmartMediaLibraryWindow:
         # File
         file_menu = tk.Menu(menubar, tearoff=0)
         menubar.add_cascade(label="File", menu=file_menu)
+        file_menu.add_command(
+            label="Open Sample Manager",
+            command=self._open_sample_manager,
+            accelerator="Ctrl+Shift+M",
+        )
         file_menu.add_command(label="Open Pattern Manager",
                               command=self.open_pattern_manager, accelerator="Ctrl+Shift+L")
         file_menu.add_separator()
@@ -145,7 +150,7 @@ class SmartMediaLibraryWindow:
         card_menu = tk.Menu(menubar, tearoff=0)
         menubar.add_cascade(label="Card", menu=card_menu)
         card_menu.add_command(label="Open Card...", command=open_card)
-        card_menu.add_command(label="Backup Card", command=backup_card)
+        card_menu.add_command(label="Quick Backup", command=backup_card)
         card_menu.add_separator()
         card_menu.add_command(label="New Card...", command=new_card)
         card_menu.add_command(label="Delete Card", command=delete_card)
@@ -170,6 +175,8 @@ class SmartMediaLibraryWindow:
         help_menu.add_command(label="View Session Log...", command=self.on_view_log)
 
         # Keyboard shortcuts
+        self.root.bind("<Control-Shift-M>", lambda e: self._open_sample_manager())
+        self.root.bind("<Control-Shift-m>", lambda e: self._open_sample_manager())
         self.root.bind("<Control-Shift-L>", lambda e: self.open_pattern_manager())
         self.root.bind("<Control-Shift-l>", lambda e: self.open_pattern_manager())
 
@@ -223,7 +230,7 @@ of virtual SP-303 cards — one card per project, kit, or physical card.
 
 Virtual cards are the heart of the workflow. They let you:
 
-  • Back up your physical card — Card -> Backup Card preserves everything
+  • Back up your physical card — Card -> Quick Backup preserves everything
     (patterns + samples) before you make any changes.
 
   • Build a project library — create as many virtual cards as you like, each
@@ -259,8 +266,8 @@ Open the Pattern Manager: File -> Open Pattern Manager (or Ctrl+Shift+L).
 
 WORK ON SAMPLES
 ─────────────────────────────────────────────
-Open Sample Manager from Card -> Open in Sample Manager in the Library,
-or Samples -> Open Sample Manager... in the Pattern Manager.
+Open Sample Manager from File -> Open Sample Manager or
+Card -> Open in Sample Manager in the Library.
 
   • Quick Import WAV Folder — point at a folder of WAVs. Dr. Sidekick
     converts and prepares everything in BOSS DATA_OUTGOING, ready to copy
@@ -276,7 +283,7 @@ or Samples -> Open Sample Manager... in the Pattern Manager.
 
 
 First time? Back up before you touch anything.
-   Card -> Backup Card, then explore. If anything goes wrong,
+   Card -> Quick Backup, then explore. If anything goes wrong,
    Card -> Restore to Card gets you back to where you started.
 """
         show_text_dialog(self.root, "Quick Start", quick_start, geometry="980x700")
@@ -331,7 +338,7 @@ Example 2: Convert an MPC1000 Kit to SP-303
 Goal: Bring an MPC1000 drum program straight onto the SP-303,
       preserving the original pad layout as closely as possible.
 
-Step 1 — Open Sample Manager from the Library or Pattern Manager.
+Step 1 — Open Sample Manager from the Library.
   In Sample Manager, choose Samples -> Convert MPC1000 Program (.pgm).
   Select the .pgm file. If the WAV samples are in the same folder
   (or a subfolder), no further prompt appears.
@@ -359,7 +366,7 @@ Example 3: Reorganize a Card Without Losing Anything
 Goal: Safely reassign pads and shuffle patterns on an existing card.
 
 Step 1 — Back up first.
-  In the SmartMedia Library window: Card -> Backup Card.
+  In the SmartMedia Library window: Card -> Quick Backup.
   A backup is created in Backup/ next to SmartMedia-Library.
 
 Step 2 — Load the current card setup.
@@ -388,7 +395,7 @@ Goal: Load a folder of WAVs onto the SP-303, then fine-tune
       which sample sits on which pad before committing to the card.
 
 Step 1 — Back up your current card first.
-  In the SmartMedia Library window: Card -> Backup Card.
+  In the SmartMedia Library window: Card -> Quick Backup.
   A backup is stored in Backup/ next to SmartMedia-Library.
 
 Step 2 — Quick Import your WAVs.
@@ -414,7 +421,7 @@ Step 4 — Write to card.
 Step 5 — Iterate.
   Not happy with the layout? Go back to Step 3 — the virtual
   card in the library holds your work between sessions.
-  When you're satisfied, Card -> Backup Card again to save
+  When you're satisfied, Card -> Quick Backup again to save
   the final state before loading it onto the hardware.
 """
         show_text_dialog(self.root, "Workflow Examples", examples, geometry="980x700")
@@ -449,7 +456,7 @@ A: Most common causes:
      confirm write-to-card is enabled if targeting a mounted physical card.
 
 Q: How do I back up and restore a card?
-A: In the SmartMedia Library window, select the card and use Card -> Backup Card.
+A: In the SmartMedia Library window, select the card and use Card -> Quick Backup.
    Backups are stored in Backup/ next to SmartMedia-Library. To restore, use
    Card -> Restore to Card.
 
@@ -732,24 +739,37 @@ A: In the SmartMedia Library window: Card -> Create Virtual Card from Physical.
                 if active_smpinfo[0] is not None:
                     card_dir = active_smpinfo[0].parent
                 else:
-                    messagebox.showwarning("Backup Card", "No physical card mounted or open.", parent=self.root)
+                    messagebox.showwarning("Quick Backup", "No physical card mounted or open.", parent=self.root)
                     return
             sp0_files = sorted(card_dir.glob("*.SP0"))
             if not sp0_files:
-                messagebox.showwarning("Backup Card", "No .SP0 files found on card.", parent=self.root)
+                messagebox.showwarning("Quick Backup", "No .SP0 files found on card.", parent=self.root)
                 return
             try:
                 dest = self.state.smartmedia_lib.backup_dir / card_dir.name
+                existing_backup_files = sorted(dest.glob("*.SP0")) if dest.exists() else []
+                if existing_backup_files:
+                    overwrite = messagebox.askyesno(
+                        "Quick Backup",
+                        (
+                            f"An existing backup is already present at Backup/{card_dir.name}/.\n\n"
+                            "Continuing will overwrite files in that backup folder with the current card contents.\n\n"
+                            "Do you want to continue?"
+                        ),
+                        parent=self.root,
+                    )
+                    if not overwrite:
+                        return
                 dest.mkdir(parents=True, exist_ok=True)
                 for f in sp0_files:
                     shutil.copy(f, dest / f.name)
-                messagebox.showinfo("Backup Card", f"Backed up {len(sp0_files)} file(s) to Backup/{card_dir.name}/", parent=self.root)
+                messagebox.showinfo("Quick Backup", f"Backed up {len(sp0_files)} file(s) to Backup/{card_dir.name}/", parent=self.root)
             except Exception as exc:
-                messagebox.showerror("Backup Card", str(exc), parent=self.root)
+                messagebox.showerror("Quick Backup", str(exc), parent=self.root)
 
         ttk.Button(top_bar, text="Open Card", command=open_card).pack(side=tk.LEFT, padx=(12, 0))
         ttk.Button(top_bar, text="Create Virtual Card", command=lambda: create_virtual_card_from_physical()).pack(side=tk.LEFT, padx=(6, 0))
-        ttk.Button(top_bar, text="Backup Card", command=backup_card).pack(side=tk.LEFT, padx=(6, 0))
+        ttk.Button(top_bar, text="Quick Backup", command=backup_card).pack(side=tk.LEFT, padx=(6, 0))
         ttk.Checkbutton(top_bar, text="Auto-backup on Open", variable=auto_backup_var,
                         command=on_auto_backup_toggle).pack(side=tk.LEFT, padx=(12, 0))
 
