@@ -13,6 +13,7 @@ from copy import deepcopy
 from datetime import datetime
 from enum import Enum
 import json
+import logging
 import math
 import os
 import random
@@ -28,6 +29,7 @@ import urllib.request
 import wave
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
+log = logging.getLogger("dr_sidekick")
 
 PTNINFO_SIZE = 64
 PTNDATA_SIZE = 65536
