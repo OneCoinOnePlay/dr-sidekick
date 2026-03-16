@@ -32,11 +32,6 @@ from dr_sidekick.ui.constants import (
 )
 from dr_sidekick.ui.dialogs import show_text_dialog
 from dr_sidekick.ui.piano_roll import PianoRollCanvas
-from dr_sidekick.ui.sample_manager import (
-    open_sample_manager as open_sample_manager_dialog,
-    run_mpc1000_import as run_mpc1000_import_action,
-    run_quick_import as run_quick_import_action,
-)
 
 if TYPE_CHECKING:
     from dr_sidekick.app_state import AppState
@@ -138,7 +133,7 @@ class PatternManagerWindow:
         self.file_menu.add_command(label="Save", command=self.on_save, accelerator="Ctrl+S")
         self.file_menu.add_command(label="Save As...", command=self.on_save_as, accelerator="Ctrl+Shift+S")
         self.file_menu.add_separator()
-        self.file_menu.add_command(label="Exit", command=self.on_exit, accelerator="Ctrl+Q")
+        self.file_menu.add_command(label="Close Pattern Manager", command=self.on_exit, accelerator="Ctrl+Q")
 
         # Initialize recent files menu
         self.update_recent_files_menu()
@@ -235,7 +230,7 @@ class PatternManagerWindow:
                 ("Ctrl+O",        "Open Pattern"),
                 ("Ctrl+S",        "Save"),
                 ("Ctrl+Shift+S",  "Save As"),
-                ("Ctrl+Q",        "Exit"),
+                ("Ctrl+Q",        "Close Pattern Manager"),
             ]),
             ("EDIT", [
                 ("Ctrl+Z",        "Undo"),
@@ -675,11 +670,11 @@ class PatternManagerWindow:
             messagebox.showerror("Error", f"Failed to save pattern: {e}")
 
     def on_exit(self):
-        """Exit application"""
+        """Close the Pattern Manager and return focus to the Library."""
         if self.model.dirty:
-            if not messagebox.askyesno("Unsaved Changes", "Exit without saving?"):
+            if not messagebox.askyesno("Unsaved Changes", "Close without saving?"):
                 return
-        self.lib_win.root.destroy()
+        self.on_hide()
 
     def on_undo(self):
         """Undo last operation"""
@@ -1533,18 +1528,6 @@ Velocity:
         button_row.pack(fill=tk.X, side=tk.BOTTOM)
         ttk.Button(button_row, text="Exchange", command=do_exchange).pack(side=tk.RIGHT)
         ttk.Button(button_row, text="Cancel", command=dialog.destroy).pack(side=tk.RIGHT, padx=(0, 8))
-
-    def on_quick_import_card(self):
-        run_quick_import_action(self)
-
-    def on_import_mpc1000(self):
-        run_mpc1000_import_action(self)
-
-    def open_sample_manager(self, smpinfo_path: Optional[Path] = None):
-        open_sample_manager_dialog(self, smpinfo_path=smpinfo_path)
-
-    def on_sample_manager(self, smpinfo_path: Optional[Path] = None):
-        self.open_sample_manager(smpinfo_path=smpinfo_path)
 
     def on_add_groove_pattern_card(self):
         groove_dir = self.state.get_library_paths()["incoming"]
