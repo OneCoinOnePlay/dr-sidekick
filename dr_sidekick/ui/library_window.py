@@ -17,6 +17,7 @@ from typing import Dict, List, Optional, Tuple, TYPE_CHECKING
 from dr_sidekick import APP_VERSION
 from dr_sidekick.engine import PROJECT_ROOT, SMPINFO, SP303_PADS, VirtualCard
 from dr_sidekick.ui.dialogs import show_text_dialog
+from dr_sidekick.ui.sample_manager import open_sample_manager as open_sample_manager_dialog
 
 if TYPE_CHECKING:
     from dr_sidekick.app_state import AppState
@@ -176,24 +177,19 @@ class SmartMediaLibraryWindow:
 
     def _open_sample_manager(self, smpinfo_path=None):
         """Open the Sample Manager dialog parented to the Library window."""
-        state = self.state
-        root = self.root
-
         class _Adapter:
-            def update_status(self, msg): pass
-            def set_loaded_card_context(self, ctx): pass
-            def ask_output_directory(self, initialdir=None):
-                kwargs = {"title": "Select Output Directory"}
-                if initialdir is not None:
-                    kwargs["initialdir"] = str(initialdir)
-                result = filedialog.askdirectory(**kwargs)
-                return Path(result) if result else None
+            def __init__(self, root, state):
+                self.root = root
+                self.state = state
 
-        adapter = _Adapter()
-        adapter.root = root
-        adapter.state = state
-        from dr_sidekick.ui.pattern_window import PatternManagerWindow
-        PatternManagerWindow.on_sample_manager(adapter, smpinfo_path=smpinfo_path)
+            def update_status(self, msg):
+                return None
+
+            def set_loaded_card_context(self, ctx):
+                return None
+
+        adapter = _Adapter(self.root, self.state)
+        open_sample_manager_dialog(adapter, smpinfo_path=smpinfo_path)
 
     def open_pattern_manager(self) -> 'PatternManagerWindow':
         """Show the Pattern Manager window, creating it if needed."""
@@ -263,7 +259,8 @@ Open the Pattern Manager: File -> Open Pattern Manager (or Ctrl+Shift+L).
 
 WORK ON SAMPLES
 ─────────────────────────────────────────────
-All sample tools are in the Pattern Manager under the Samples menu.
+Open Sample Manager from Card -> Open in Sample Manager in the Library,
+or Samples -> Open Sample Manager... in the Pattern Manager.
 
   • Quick Import WAV Folder — point at a folder of WAVs. Dr. Sidekick
     converts and prepares everything in BOSS DATA_OUTGOING, ready to copy
@@ -300,7 +297,8 @@ Step 1 — Open the Pattern Manager.
   In the SmartMedia Library window: File -> Open Pattern Manager (Ctrl+Shift+L).
 
 Step 2 — Load your samples onto the card.
-  Samples -> Quick Import WAV Folder -> select your kit folder.
+  Open Sample Manager, then Samples -> Quick Import WAV Folder.
+  Select your kit folder.
   Files are prepared in SmartMedia-Library/Cards/BOSS DATA_OUTGOING.
   If more than 8 WAVs, load BANK_LOAD_01 first, then BANK_LOAD_02
   on the device. Samples land on pads A1–D8 in file order.
@@ -333,8 +331,8 @@ Example 2: Convert an MPC1000 Kit to SP-303
 Goal: Bring an MPC1000 drum program straight onto the SP-303,
       preserving the original pad layout as closely as possible.
 
-Step 1 — Open the Pattern Manager, then go to
-  Samples -> Convert MPC1000 Program (.pgm).
+Step 1 — Open Sample Manager from the Library or Pattern Manager.
+  In Sample Manager, choose Samples -> Convert MPC1000 Program (.pgm).
   Select the .pgm file. If the WAV samples are in the same folder
   (or a subfolder), no further prompt appears.
   If WAVs live elsewhere, a folder picker opens.
@@ -365,7 +363,7 @@ Step 1 — Back up first.
   A backup is created in Backup/ next to SmartMedia-Library.
 
 Step 2 — Load the current card setup.
-  In the Pattern Manager: Samples -> Sample Manager -> Load Card Setup.
+  Open Sample Manager, then click Load Card Setup.
   All current pad assignments appear in the table.
 
 Step 3 — Reassign pads.
@@ -394,7 +392,7 @@ Step 1 — Back up your current card first.
   A backup is stored in Backup/ next to SmartMedia-Library.
 
 Step 2 — Quick Import your WAVs.
-  In the Pattern Manager: Samples -> Quick Import WAV Folder.
+  Open Sample Manager and choose Samples -> Quick Import WAV Folder.
   Select your kit folder. Dr. Sidekick converts and prepares
   the files in SmartMedia-Library/Cards/BOSS DATA_OUTGOING.
   If there are more than 8 WAVs they split into BANK_LOAD_01,
@@ -402,7 +400,7 @@ Step 2 — Quick Import your WAVs.
   Samples are assigned to pads in file order (A1 upwards).
 
 Step 3 — Review and reassign pads.
-  Samples -> Sample Manager -> Load Card Setup.
+  In Sample Manager, click Load Card Setup.
   The table shows every pad and its current assignment.
   To move a sample: select its row, click Assign WAV/SP0,
   and pick the replacement file. Repeat for any pad you want
