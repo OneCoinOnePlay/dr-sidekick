@@ -12,16 +12,17 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 from tkinter import filedialog, messagebox, simpledialog, ttk
-from typing import List, Optional, Tuple, TYPE_CHECKING
+from typing import Dict, List, Optional, Tuple, TYPE_CHECKING
 
 from dr_sidekick import APP_VERSION
-from dr_sidekick.engine import SMPINFO, VirtualCard
+from dr_sidekick.engine import PROJECT_ROOT, SMPINFO, SP303_PADS, VirtualCard
 from dr_sidekick.ui.dialogs import show_text_dialog
 
 if TYPE_CHECKING:
     from dr_sidekick.app_state import AppState
 
 log = logging.getLogger("dr_sidekick")
+_LOG_PATH = PROJECT_ROOT / "Dr_Sidekick.log"
 
 class SmartMediaLibraryWindow:
     """SmartMedia Library — the application's true root window."""
@@ -197,6 +198,7 @@ class SmartMediaLibraryWindow:
     def open_pattern_manager(self) -> 'PatternManagerWindow':
         """Show the Pattern Manager window, creating it if needed."""
         if self._editor is None:
+            from dr_sidekick.ui.pattern_window import PatternManagerWindow
             self._editor_win = tk.Toplevel(self.root)
             debug_mode = "--debug" in sys.argv[1:]
             self._editor = PatternManagerWindow(self._editor_win, self.state, self, debug_mode=debug_mode)

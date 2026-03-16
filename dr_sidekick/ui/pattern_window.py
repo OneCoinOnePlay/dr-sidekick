@@ -7,6 +7,7 @@ import logging
 import os
 import shutil
 import subprocess
+import struct
 import sys
 import tempfile
 import threading
@@ -15,6 +16,7 @@ import traceback
 import urllib.error
 import urllib.request
 import wave
+from datetime import datetime
 from pathlib import Path
 from tkinter import filedialog, messagebox, simpledialog, ttk
 from typing import Dict, List, Optional, Tuple, TYPE_CHECKING
@@ -41,6 +43,7 @@ from dr_sidekick.engine import (
 )
 from dr_sidekick.ui.constants import (
     COLOR_PALETTES,
+    COLORS,
     GRID_SNAPS,
     PAD_NAMES,
     PAD_ORDER,
@@ -2795,4 +2798,3 @@ Velocity:
             self.add_recent_file(ptninfo_path)
         except Exception as e:
             messagebox.showerror("Error", f"Failed to load pattern: {e}")
-
