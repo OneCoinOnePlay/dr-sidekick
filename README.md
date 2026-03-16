@@ -90,16 +90,6 @@ Dr. Sidekick reads and writes the SP-303's native SmartMedia card format:
 | `SMPINFO0.SP0` | Sample slot assignments (65 536 bytes) |
 | `SMPxxxxL/R.SP0` | Sample audio data (RDAC MT1 compressed) |
 
-## Refactoring & Architecture
-
-The project has transitioned from a monolithic script into a modular architecture to support future expansion and hardware-specific edge cases:
-
-- **Core Engine (`dr_sidekick/engine/core.py`):** Low-level binary handlers for SP-303 files. This includes bit-level serialization for `PTNInfo`, `PTNData`, and `SMPINFO`, along with the proprietary RDAC (MT1/MT2) decoder for `.SP0` audio files.
-- **Application State (`dr_sidekick/app_state.py`):** A centralized state manager that abstracts physical SmartMedia cards into "Virtual Cards." It handles persistent configuration and library paths.
-- **Pattern Model (`dr_sidekick/engine/patterns.py`):** Decoupled pattern logic with a 50-level Undo/Redo stack. It manages high-level sequencer operations and MIDI-to-SP303 coordinate mapping.
-- **UI Framework (`dr_sidekick/ui/`):** A modular Tkinter implementation separating the Library Manager, Sample Manager (including MPC1000 `.pgm` conversion), and the custom-drawn Piano Roll sequencer.
-- **Bootloader (`Dr_Sidekick.py`):** A lightweight entry point that provides global exception logging and optional `TkinterDnD` integration.
-
 ## SmartMedia Library
 
 `SmartMedia-Library/` manages virtual cards and sample assets:
