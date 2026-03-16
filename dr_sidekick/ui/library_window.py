@@ -5,19 +5,17 @@ from __future__ import annotations
 import json
 import logging
 import shutil
-import sys
 import threading
 import tkinter as tk
 import urllib.error
 import urllib.request
 from pathlib import Path
 from tkinter import filedialog, messagebox, simpledialog, ttk
-from typing import Dict, List, Optional, Tuple, TYPE_CHECKING
+from typing import Callable, Dict, List, Optional, Tuple, TYPE_CHECKING
 
 from dr_sidekick import APP_VERSION
 from dr_sidekick.engine import PROJECT_ROOT, SMPINFO, SP303_PADS, VirtualCard
 from dr_sidekick.ui.dialogs import show_text_dialog
-from dr_sidekick.ui.sample_manager import open_sample_manager as open_sample_manager_dialog
 
 if TYPE_CHECKING:
     from dr_sidekick.app_state import AppState
@@ -28,17 +26,23 @@ _LOG_PATH = PROJECT_ROOT / "Dr_Sidekick.log"
 class SmartMediaLibraryWindow:
     """SmartMedia Library — the application's true root window."""
 
-    def __init__(self, root, state: 'AppState'):
+    def __init__(
+        self,
+        root,
+        state: 'AppState',
+        *,
+        on_open_sample_manager: Callable[[Optional[Path]], None],
+        on_open_pattern_manager: Callable[[], None],
+    ):
         self.root = root
         self.state = state
+        self._on_open_sample_manager = on_open_sample_manager
+        self._on_open_pattern_manager = on_open_pattern_manager
         self.root.title("Dr. Sidekick — SmartMedia Library")
         self.root.geometry("1200x720")
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
         self._setup_styles()
-
-        self._editor: Optional['PatternManagerWindow'] = None
-        self._editor_win: Optional[tk.Toplevel] = None
 
         self._build_ui()
 
@@ -138,7 +142,7 @@ class SmartMediaLibraryWindow:
         menubar.add_cascade(label="File", menu=file_menu)
         file_menu.add_command(
             label="Open Sample Manager",
-            command=self._open_sample_manager,
+            command=self.open_sample_manager,
             accelerator="Ctrl+Shift+M",
         )
         file_menu.add_command(label="Open Pattern Manager",
@@ -175,40 +179,20 @@ class SmartMediaLibraryWindow:
         help_menu.add_command(label="View Session Log...", command=self.on_view_log)
 
         # Keyboard shortcuts
-        self.root.bind("<Control-Shift-M>", lambda e: self._open_sample_manager())
-        self.root.bind("<Control-Shift-m>", lambda e: self._open_sample_manager())
+        self.root.bind("<Control-Shift-M>", lambda e: self.open_sample_manager())
+        self.root.bind("<Control-Shift-m>", lambda e: self.open_sample_manager())
         self.root.bind("<Control-Shift-L>", lambda e: self.open_pattern_manager())
         self.root.bind("<Control-Shift-l>", lambda e: self.open_pattern_manager())
 
     # ── Pattern Manager ──────────────────────────────────────────────────
 
-    def _open_sample_manager(self, smpinfo_path=None):
-        """Open the Sample Manager dialog parented to the Library window."""
-        class _Adapter:
-            def __init__(self, root, state):
-                self.root = root
-                self.state = state
+    def open_sample_manager(self, smpinfo_path: Optional[Path] = None) -> None:
+        """Delegate Sample Manager launch to the application controller."""
+        self._on_open_sample_manager(smpinfo_path)
 
-            def update_status(self, msg):
-                return None
-
-            def set_loaded_card_context(self, ctx):
-                return None
-
-        adapter = _Adapter(self.root, self.state)
-        open_sample_manager_dialog(adapter, smpinfo_path=smpinfo_path)
-
-    def open_pattern_manager(self) -> 'PatternManagerWindow':
-        """Show the Pattern Manager window, creating it if needed."""
-        if self._editor is None:
-            from dr_sidekick.ui.pattern_window import PatternManagerWindow
-            self._editor_win = tk.Toplevel(self.root)
-            debug_mode = "--debug" in sys.argv[1:]
-            self._editor = PatternManagerWindow(self._editor_win, self.state, self, debug_mode=debug_mode)
-        else:
-            self._editor_win.deiconify()
-        self._editor_win.lift()
-        return self._editor
+    def open_pattern_manager(self) -> None:
+        """Delegate Pattern Manager launch to the application controller."""
+        self._on_open_pattern_manager()
 
     def _on_close(self):
         """Quit the application."""
@@ -673,7 +657,7 @@ A: In the SmartMedia Library window: Card -> Create Virtual Card from Physical.
         ttk.Button(header_frame, text="Open Pattern Manager",
                    command=self.open_pattern_manager).pack(side=tk.RIGHT)
         ttk.Button(header_frame, text="Open Sample Manager",
-                   command=self._open_sample_manager).pack(side=tk.RIGHT, padx=(0, 6))
+                   command=self.open_sample_manager).pack(side=tk.RIGHT, padx=(0, 6))
 
         # ── Top status bar ──────────────────────────────────────────────────
         top_bar = ttk.Frame(frame)
@@ -994,7 +978,7 @@ A: In the SmartMedia Library window: Card -> Create Virtual Card from Physical.
                     parent=self.root,
                 )
                 return
-            self._open_sample_manager(smpinfo_path=smpinfo)
+            self.open_sample_manager(smpinfo_path=smpinfo)
 
         def create_virtual_card_from_physical():
             if active_smpinfo[0] is None:
