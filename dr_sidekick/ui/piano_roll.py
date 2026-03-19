@@ -167,7 +167,7 @@ class PianoRollCanvas(tk.Canvas):
         """Update scrollable region based on zoom and pattern length"""
         # Calculate total width needed (pattern length in pixels)
         max_ticks = self.pattern_length_bars * 4 * INTERNAL_PPQN
-        total_width = int(max_ticks * self.zoom_x) + 100  # Add padding
+        total_width = round(max_ticks * self.zoom_x) + 100  # Add padding
 
         # Calculate total height needed (32 lanes + ruler)
         ruler_height = 25
@@ -200,8 +200,8 @@ class PianoRollCanvas(tk.Canvas):
         ruler_height = 25
         left_px = self.canvasx(0)
         right_px = self.canvasx(width)
-        left_tick = int(left_px / self.zoom_x)
-        right_tick = int(right_px / self.zoom_x)
+        left_tick = round(left_px / self.zoom_x)
+        right_tick = round(right_px / self.zoom_x)
 
         # Draw ruler background
         self.create_rectangle(
@@ -242,8 +242,8 @@ class PianoRollCanvas(tk.Canvas):
         right_px = self.canvasx(width)
         top_py = self.canvasy(0)
         bottom_py = self.canvasy(height)
-        left_tick = int(left_px / self.zoom_x)
-        right_tick = int(right_px / self.zoom_x)
+        left_tick = round(left_px / self.zoom_x)
+        right_tick = round(right_px / self.zoom_x)
 
         # Vertical grid lines (time)
         # Draw grid based on snap setting, or every quarter note if snap is off
@@ -371,11 +371,11 @@ class PianoRollCanvas(tk.Canvas):
 
     def tick_to_x(self, tick: int) -> int:
         """Convert tick to X pixel coordinate"""
-        return int(tick * self.zoom_x)
+        return round(tick * self.zoom_x)
 
     def x_to_tick(self, x: int) -> int:
         """Convert X pixel to tick (with snap)"""
-        tick = int(self.canvasx(x) / self.zoom_x)
+        tick = round(self.canvasx(x) / self.zoom_x)
         if self.grid_snap > 0:
             tick = round(tick / self.grid_snap) * self.grid_snap
         max_ticks = self.pattern_length_bars * 4 * INTERNAL_PPQN  # bars * 4 beats * 96 PPQN
@@ -398,7 +398,7 @@ class PianoRollCanvas(tk.Canvas):
             return None
 
         # Convert to actual pixel tick (no snapping for hit detection)
-        tick_raw = int(self.canvasx(x) / self.zoom_x)
+        tick_raw = round(self.canvasx(x) / self.zoom_x)
         pad = self.y_to_pad(y)
 
         # Match hit-test width to rendered event width.
