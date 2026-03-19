@@ -781,6 +781,7 @@ class SlotRecord:
     is_gate: bool = False              # Gate playback mode (byte 0x25)
     is_loop: bool = False              # Loop playback mode (byte 0x26)
     is_reverse: bool = False           # Reverse playback mode (byte 0x27)
+    level: int = 0x7F                  # Sample level (byte 0x23 of dsp_const, 0-127)
     reserved_0_11: bytes = bytes(12)  # Reserved bytes 0-11
     
     @property
@@ -838,8 +839,8 @@ class SlotRecord:
             divider = self.params_word & 0xFFFF
             record[28:32] = struct.pack('>HH', divider, divider)
         
-        # Bytes 32-35: Constant
-        record[32:36] = TEMPLATE_BYTES_32_35
+        # Bytes 32-35: DSP constant (0x113A06xx where xx = level)
+        record[32:36] = bytes([0x11, 0x3A, 0x06, self.level & 0x7F])
         
         # Byte 36: Stereo flag
         record[36] = 0x01 if self.is_stereo else 0x00
@@ -879,6 +880,7 @@ class SlotRecord:
         is_gate = data[37] == 0x01
         is_loop = data[38] == 0x01
         is_reverse = data[39] == 0x01
+        level = data[35] & 0x7F  # Last byte of dsp_const (0x113A06xx)
 
         return cls(
             slot_index=slot_index,
@@ -890,6 +892,7 @@ class SlotRecord:
             is_gate=is_gate,
             is_loop=is_loop,
             is_reverse=is_reverse,
+            level=level,
             reserved_0_11=reserved_0_11
         )
     
@@ -1591,7 +1594,7 @@ class SP303CardPrep:
 
             if overwritten_count > 0:
                 results['warnings'].append(
-                    f"Overwrote {overwritten_count} existing SP0 file(s) on card. Snapshot taken before write."
+                    f"Overwrote {overwritten_count} existing SP0 file(s) on card."
                 )
         
         # Process WAV files

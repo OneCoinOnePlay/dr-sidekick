@@ -464,6 +464,11 @@ Q: How do I import my physical SP-303 card into the library?
 A: In the SmartMedia Library window: Card -> Create Virtual Card from Physical.
    This copies the SP0 files from the mounted card into a new virtual card entry.
 
+Q: My imported samples are peaking / too loud on the SP-303.
+A: Quick Import does not alter the audio level of your WAV files. If samples
+   are peaking after import, use the LEVEL parameter on the SP-303 to reduce
+   the amplitude for each pad.
+
 """
         show_text_dialog(self.root, "FAQ / Troubleshooting", faq, geometry="1024x680")
 
