@@ -80,6 +80,79 @@ class GrooveTiming:
 
 
 @dataclass
+class GrooveTemplate:
+    """A groove loaded from the JSON groove library.
+
+    Grid-type grooves store per-step tick offsets from the perfect grid.
+    Compound grooves store raw tick positions (multiple grid sizes overlaid).
+    """
+    name: str
+    groove_type: str          # "grid" or "compound"
+    machine: str
+    author: str
+    ppqn: int = INTERNAL_PPQN
+    grid: int = 0             # grid tick size (grid-type only)
+    grid_label: str = ""      # human-readable grid label
+    steps_per_beat: int = 0   # steps per beat (grid-type only)
+    beats: int = 0
+    offsets: List[int] = field(default_factory=list)  # grid-type
+    ticks: List[int] = field(default_factory=list)    # compound-type
+
+
+class GrooveLibrary:
+    """Loads and indexes the JSON groove files from the grooves/ folder."""
+
+    def __init__(self, grooves_dir: Optional[Path] = None):
+        if grooves_dir is None:
+            grooves_dir = PROJECT_ROOT / "grooves"
+        self.grooves_dir = grooves_dir
+        self.machines: List[str] = []
+        self._by_machine: Dict[str, List[GrooveTemplate]] = {}
+        self._attribution: Dict[str, dict] = {}
+        self._load()
+
+    def _load(self):
+        if not self.grooves_dir.is_dir():
+            log.warning("Groove library folder not found: %s", self.grooves_dir)
+            return
+        for json_path in sorted(self.grooves_dir.glob("*.json")):
+            try:
+                with open(json_path, "r") as f:
+                    data = json.load(f)
+                machine = data["machine"]
+                attribution = data.get("attribution", {})
+                author = attribution.get("author", "")
+                self._attribution[machine] = attribution
+                templates = []
+                for g in data.get("grooves", []):
+                    tmpl = GrooveTemplate(
+                        name=g["name"],
+                        groove_type=g.get("type", "grid"),
+                        machine=machine,
+                        author=author,
+                        ppqn=g.get("ppqn", INTERNAL_PPQN),
+                        grid=g.get("grid", 0),
+                        grid_label=g.get("grid_label", ""),
+                        steps_per_beat=g.get("steps_per_beat", 0),
+                        beats=g.get("beats", 0),
+                        offsets=g.get("offsets", []),
+                        ticks=g.get("ticks", []),
+                    )
+                    templates.append(tmpl)
+                self._by_machine[machine] = templates
+                self.machines.append(machine)
+                log.debug("Loaded %d grooves for %s", len(templates), machine)
+            except Exception:
+                log.error("Failed to load groove file %s:\n%s", json_path, traceback.format_exc())
+
+    def get_grooves(self, machine: str) -> List[GrooveTemplate]:
+        return self._by_machine.get(machine, [])
+
+    def get_attribution(self, machine: str) -> dict:
+        return self._attribution.get(machine, {})
+
+
+@dataclass
 class PatternSlot:
     """Represents one pattern slot in PTNINFO"""
     slot_index: int

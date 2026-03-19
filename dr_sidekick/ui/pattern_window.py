@@ -15,6 +15,7 @@ from typing import Dict, List, Optional, Tuple, TYPE_CHECKING
 
 from dr_sidekick.engine import (
     DEFAULT_PATTERN_LENGTH_BARS,
+    GrooveLibrary,
     INTERNAL_PPQN,
     MAX_PATTERN_LENGTH_BARS,
     PatternModel,
@@ -57,6 +58,7 @@ class PatternManagerWindow:
 
         # Model
         self.model = PatternModel()
+        self.groove_library = GrooveLibrary()
         self.current_palette = "Apple Green"
         self.slot_combo: Optional[ttk.Combobox] = None
         self.active_workflow = "Patterns"
@@ -151,6 +153,8 @@ class PatternManagerWindow:
         edit_menu.add_command(label="Paste Pattern", command=self.on_paste_slot, accelerator="Ctrl+Shift+V")
         edit_menu.add_separator()
         edit_menu.add_command(label="Quantize Selected...", command=self.on_quantize_selected)
+        edit_menu.add_command(label="Apply Groove...", command=self.on_apply_groove)
+        edit_menu.add_command(label="Stamp Pattern...", command=self.on_stamp_pattern)
         edit_menu.add_command(label="Set Velocity...", command=self.on_set_velocity)
         edit_menu.add_separator()
         edit_menu.add_command(label="Clear Pattern", command=self.on_clear_slot)
@@ -196,6 +200,7 @@ class PatternManagerWindow:
         help_menu = tk.Menu(menubar, tearoff=0)
         menubar.add_cascade(label="Help", menu=help_menu)
         help_menu.add_command(label="Keyboard Shortcuts", command=self.on_show_shortcuts)
+        help_menu.add_command(label="Grooves & Patterns", command=self.on_show_groove_help)
 
 
     def on_show_shortcuts(self):
@@ -277,6 +282,99 @@ class PatternManagerWindow:
                 ).grid(row=row, column=1, sticky="w")
                 row += 1
 
+    def on_show_groove_help(self):
+        """Show the Grooves & Patterns help page."""
+        # Build machine/groove summary from the loaded library
+        lines = []
+        grid_total = 0
+        compound_total = 0
+        for m in self.groove_library.machines:
+            grooves = self.groove_library.get_grooves(m)
+            g = sum(1 for x in grooves if x.groove_type == "grid")
+            c = sum(1 for x in grooves if x.groove_type == "compound")
+            grid_total += g
+            compound_total += c
+            parts = []
+            if g:
+                parts.append(f"{g} grooves")
+            if c:
+                parts.append(f"{c} patterns")
+            lines.append(f"  {m:12s}  {', '.join(parts)}")
+
+        attr = self.groove_library.get_attribution(
+            self.groove_library.machines[0]
+        ) if self.groove_library.machines else {}
+        attr_line = (
+            f"{attr.get('author', '')} — {attr.get('license', '')}"
+            if attr else "Unknown"
+        )
+
+        content = f"""\
+GROOVES & PATTERNS
+==================
+
+Dr. Sidekick includes a library of timing templates captured from
+classic drum machines. These let you apply the feel of vintage
+hardware to your SP-303 patterns.
+
+  Groove library:  {grid_total} grooves, {compound_total} patterns
+  Attribution:     {attr_line}
+
+
+APPLY GROOVE  (Edit > Apply Groove)
+-----------------------------------
+
+Shifts the timing of selected events to match a machine's swing
+or humanised feel. The original notes stay on the same pads —
+only their timing changes.
+
+  How to use:
+    1. Select the events you want to affect (Ctrl+A for all)
+    2. Edit > Apply Groove
+    3. Choose a machine, then a groove
+    4. Click Apply (or double-click the groove)
+
+  The groove quantises each event to the groove's grid (e.g. 16th
+  notes) and then shifts it by the machine's recorded offset.
+  This is undoable (Ctrl+Z).
+
+  Grid labels:
+    16   = 16th notes      (24 ticks)
+    16T  = 16th triplets   (16 ticks)
+    8    = 8th notes        (48 ticks)
+    8T   = 8th triplets    (32 ticks)
+    4T   = quarter triplets (64 ticks)
+
+  Tip: Apply Groove works best on events that are already close to
+  a grid. If your notes are freeform, quantise them first
+  (Edit > Quantize Selected).
+
+
+STAMP PATTERN  (Edit > Stamp Pattern)
+--------------------------------------
+
+Adds a rhythmic pattern to the current slot on a chosen pad.
+Unlike Apply Groove, this creates new events — it does not move
+existing ones.
+
+  How to use:
+    1. Edit > Stamp Pattern
+    2. Choose a machine and a pattern
+    3. Pick a target pad (e.g. A1)
+    4. Click Stamp
+
+  Patterns are timing templates captured from machines that used
+  compound rhythms (e.g. overlaid 8th notes and 16th triplets).
+
+  This is undoable (Ctrl+Z).
+
+
+AVAILABLE MACHINES
+------------------
+
+{chr(10).join(lines)}
+"""
+        show_text_dialog(self.root, "Grooves & Patterns", content, "580x720")
 
     def _create_toolbar(self):
         """Create toolbar"""
@@ -1025,22 +1123,13 @@ class PatternManagerWindow:
             self.canvas.redraw()
             self._focus_first_event()
             action = "Replaced" if replace else "Added"
+            status_msg = f"MIDI Import: {action} {count} events from Ch {selected_channel}"
             if import_meta["truncated_events"] > 0:
-                self.update_status(
-                    f"MIDI Import: {action} {count} events from Ch {selected_channel} ({midi_path.name}) "
-                    f"(truncated +{import_meta['truncated_bars']:.1f} bar(s))"
-                )
-            elif import_meta["density_truncated_events"] > 0:
-                capped_source_bars = min(import_meta["max_bars"], import_meta.get("source_bars", import_meta["max_bars"]))
-                discarded_capacity_bars = max(0.0, capped_source_bars - float(import_meta["imported_length_bars"]))
-                self.update_status(
-                    f"MIDI Import: {action} {count} events from Ch {selected_channel} ({midi_path.name}) "
-                    f"(loaded ~{float(import_meta['imported_length_bars']):.1f} bars, discarded ~{discarded_capacity_bars:.1f} bars)"
-                )
-            else:
-                self.update_status(
-                    f"MIDI Import: {action} {count} events from Ch {selected_channel} ({midi_path.name})"
-                )
+                status_msg += f" (Time Truncated: {import_meta['truncated_events']} notes)"
+            if import_meta["density_truncated_events"] > 0:
+                status_msg += f" (CAPACITY EXCEEDED: {import_meta['density_truncated_events']} notes dropped)"
+            
+            self.update_status(status_msg)
             self.refresh_slot_labels()
 
             truncation_note = ""
@@ -1364,6 +1453,219 @@ class PatternManagerWindow:
         button_frame.pack(pady=(10, 10))
         ttk.Button(button_frame, text="Apply", command=lambda: apply_quantize(quantize_var.get(), close_after=True)).pack(side=tk.LEFT, padx=5)
         ttk.Button(button_frame, text="Cancel", command=dialog.destroy).pack(side=tk.LEFT, padx=5)
+
+        # Center dialog
+        dialog.update_idletasks()
+        x = self.root.winfo_x() + (self.root.winfo_width() - dialog.winfo_width()) // 2
+        y = self.root.winfo_y() + (self.root.winfo_height() - dialog.winfo_height()) // 2
+        dialog.geometry(f"+{x}+{y}")
+
+    def on_apply_groove(self):
+        """Apply a groove template to selected events."""
+        if not self.canvas.selected_events:
+            messagebox.showwarning("Apply Groove", "No events selected")
+            return
+
+        if not self.groove_library.machines:
+            messagebox.showwarning("Apply Groove", "No groove files found in grooves/ folder")
+            return
+
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Apply Groove")
+        dialog.geometry("420x460")
+        dialog.transient(self.root)
+        dialog.grab_set()
+        dialog.configure(bg="#000000")
+
+        # Attribution label (updated when machine changes)
+        attr_var = tk.StringVar(value="")
+        attr_label = ttk.Label(dialog, textvariable=attr_var, wraplength=380,
+                               font=("TkDefaultFont", 9, "italic"))
+        attr_label.pack(side=tk.BOTTOM, pady=(0, 8), padx=10)
+
+        # Machine picker
+        ttk.Label(dialog, text="Machine:").pack(pady=(10, 4))
+        machine_var = tk.StringVar()
+        machine_combo = ttk.Combobox(dialog, textvariable=machine_var,
+                                     values=self.groove_library.machines,
+                                     state="readonly", width=30)
+        machine_combo.pack(padx=20)
+
+        # Groove listbox
+        ttk.Label(dialog, text="Groove:").pack(pady=(10, 4))
+        list_frame = ttk.Frame(dialog)
+        list_frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=(0, 6))
+        scrollbar = ttk.Scrollbar(list_frame)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        groove_listbox = tk.Listbox(list_frame, yscrollcommand=scrollbar.set,
+                                    bg="#1a1a1a", fg="#cccccc",
+                                    selectbackground="#335533",
+                                    selectforeground="#ffffff",
+                                    font=("TkFixedFont", 11))
+        groove_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.config(command=groove_listbox.yview)
+
+        # Track the currently loaded groove list
+        current_grooves: list = []
+
+        def on_machine_change(_event=None):
+            current_grooves.clear()
+            groove_listbox.delete(0, tk.END)
+            machine = machine_var.get()
+            grooves = [g for g in self.groove_library.get_grooves(machine)
+                       if g.groove_type == "grid"]
+            current_grooves.extend(grooves)
+            for g in grooves:
+                groove_listbox.insert(tk.END, f"{g.name}  [{g.grid_label}]")
+            # Update attribution
+            attr = self.groove_library.get_attribution(machine)
+            if attr:
+                attr_var.set(f"Grooves by {attr.get('author', '?')}  •  {attr.get('license', '')}")
+            else:
+                attr_var.set("")
+
+        machine_combo.bind("<<ComboboxSelected>>", on_machine_change)
+
+        def apply_selected():
+            sel = groove_listbox.curselection()
+            if not sel:
+                messagebox.showwarning("Apply Groove", "Select a groove first")
+                return
+            groove = current_grooves[sel[0]]
+            events = list(self.canvas.selected_events)
+            moved = self.model.apply_groove(events, groove)
+            self.canvas.redraw()
+            self.update_status(
+                f"Groove '{groove.name}' applied to {len(events)} event(s) ({moved} moved)"
+            )
+            dialog.destroy()
+
+        # Buttons
+        button_frame = ttk.Frame(dialog)
+        button_frame.pack(pady=(6, 10))
+        ttk.Button(button_frame, text="Apply", command=apply_selected).pack(side=tk.LEFT, padx=5)
+        ttk.Button(button_frame, text="Cancel", command=dialog.destroy).pack(side=tk.LEFT, padx=5)
+
+        # Double-click to apply
+        groove_listbox.bind("<Double-1>", lambda _e: apply_selected())
+
+        # Select first machine
+        if self.groove_library.machines:
+            machine_combo.current(0)
+            on_machine_change()
+
+        # Center dialog
+        dialog.update_idletasks()
+        x = self.root.winfo_x() + (self.root.winfo_width() - dialog.winfo_width()) // 2
+        y = self.root.winfo_y() + (self.root.winfo_height() - dialog.winfo_height()) // 2
+        dialog.geometry(f"+{x}+{y}")
+
+    def on_stamp_pattern(self):
+        """Stamp a compound rhythm pattern into the current slot on a chosen pad."""
+        if not self.groove_library.machines:
+            messagebox.showwarning("Stamp Pattern", "No groove files found in grooves/ folder")
+            return
+
+        # Check which machines have compound patterns
+        machines_with_compounds = [
+            m for m in self.groove_library.machines
+            if any(g.groove_type == "compound" for g in self.groove_library.get_grooves(m))
+        ]
+        if not machines_with_compounds:
+            messagebox.showwarning("Stamp Pattern", "No compound patterns found in groove library")
+            return
+
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Stamp Pattern")
+        dialog.geometry("420x520")
+        dialog.transient(self.root)
+        dialog.grab_set()
+        dialog.configure(bg="#000000")
+
+        # Attribution
+        attr_var = tk.StringVar(value="")
+        attr_label = ttk.Label(dialog, textvariable=attr_var, wraplength=380,
+                               font=("TkDefaultFont", 9, "italic"))
+        attr_label.pack(side=tk.BOTTOM, pady=(0, 8), padx=10)
+
+        # Machine picker
+        ttk.Label(dialog, text="Machine:").pack(pady=(10, 4))
+        machine_var = tk.StringVar()
+        machine_combo = ttk.Combobox(dialog, textvariable=machine_var,
+                                     values=machines_with_compounds,
+                                     state="readonly", width=30)
+        machine_combo.pack(padx=20)
+
+        # Pattern listbox
+        ttk.Label(dialog, text="Pattern:").pack(pady=(10, 4))
+        list_frame = ttk.Frame(dialog)
+        list_frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=(0, 6))
+        scrollbar = ttk.Scrollbar(list_frame)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        pattern_listbox = tk.Listbox(list_frame, yscrollcommand=scrollbar.set,
+                                     bg="#1a1a1a", fg="#cccccc",
+                                     selectbackground="#335533",
+                                     selectforeground="#ffffff",
+                                     font=("TkFixedFont", 11))
+        pattern_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.config(command=pattern_listbox.yview)
+
+        # Pad picker
+        pad_frame = ttk.Frame(dialog)
+        pad_frame.pack(fill=tk.X, padx=20, pady=(6, 0))
+        ttk.Label(pad_frame, text="Target pad:").pack(side=tk.LEFT)
+        pad_var = tk.StringVar(value="A1")
+        pad_values = [PAD_NAMES[p] for p in PAD_ORDER]
+        pad_combo = ttk.Combobox(pad_frame, textvariable=pad_var,
+                                 values=pad_values, state="readonly", width=6)
+        pad_combo.pack(side=tk.LEFT, padx=(8, 0))
+
+        current_patterns: list = []
+
+        def on_machine_change(_event=None):
+            current_patterns.clear()
+            pattern_listbox.delete(0, tk.END)
+            machine = machine_var.get()
+            patterns = [g for g in self.groove_library.get_grooves(machine)
+                        if g.groove_type == "compound"]
+            current_patterns.extend(patterns)
+            for g in patterns:
+                pattern_listbox.insert(tk.END, f"{g.name}  ({len(g.ticks)} hits)")
+            attr = self.groove_library.get_attribution(machine)
+            if attr:
+                attr_var.set(f"Grooves by {attr.get('author', '?')}  •  {attr.get('license', '')}")
+            else:
+                attr_var.set("")
+
+        machine_combo.bind("<<ComboboxSelected>>", on_machine_change)
+
+        def apply_selected():
+            sel = pattern_listbox.curselection()
+            if not sel:
+                messagebox.showwarning("Stamp Pattern", "Select a pattern first")
+                return
+            groove = current_patterns[sel[0]]
+            # Resolve pad name to pad number
+            pad_name = pad_var.get()
+            pad_num = next((p for p, n in PAD_NAMES.items() if n == pad_name), 0x00)
+            added = self.model.stamp_pattern(groove, pad_num)
+            self.canvas.redraw()
+            self.update_status(
+                f"Stamped '{groove.name}' on pad {pad_name} ({added} events added)"
+            )
+            dialog.destroy()
+
+        # Buttons
+        button_frame = ttk.Frame(dialog)
+        button_frame.pack(pady=(6, 10))
+        ttk.Button(button_frame, text="Stamp", command=apply_selected).pack(side=tk.LEFT, padx=5)
+        ttk.Button(button_frame, text="Cancel", command=dialog.destroy).pack(side=tk.LEFT, padx=5)
+
+        pattern_listbox.bind("<Double-1>", lambda _e: apply_selected())
+
+        if machines_with_compounds:
+            machine_combo.current(0)
+            on_machine_change()
 
         # Center dialog
         dialog.update_idletasks()
