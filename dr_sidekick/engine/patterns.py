@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from pathlib import Path
 from tkinter import messagebox
@@ -20,6 +21,7 @@ from .core import (
     SLOT_COUNT,
     TUPLE_ZONE_MAX_BYTES,
     Event,
+    GrooveTemplate,
     load_midi_notes,
 )
 
@@ -344,6 +346,48 @@ class PatternModel:
         self.events.sort(key=lambda event: event.tick)
         self.dirty = True
 
+    def apply_groove(self, events: List[Event], groove: GrooveTemplate) -> int:
+        """Apply a groove template to selected events.
+
+        Quantizes each event to the groove's grid, then shifts by the
+        per-step offset. Only works with grid-type grooves.
+
+        Returns the number of events that moved.
+        """
+        if not events or groove.groove_type != "grid" or groove.grid <= 0 or not groove.offsets:
+            return 0
+        self.push_undo_state()
+        moved = 0
+        grid = groove.grid
+        n_offsets = len(groove.offsets)
+        for event in events:
+            quantized = round(event.tick / grid) * grid
+            step = quantized // grid
+            offset = groove.offsets[step % n_offsets]
+            new_tick = max(0, quantized + offset)
+            if new_tick != event.tick:
+                moved += 1
+            event.tick = new_tick
+        self.events.sort(key=lambda event: event.tick)
+        self.dirty = True
+        return moved
+
+    def stamp_pattern(self, groove: GrooveTemplate, pad: int,
+                      velocity: int = 0x7F) -> int:
+        """Stamp a compound groove pattern into the current slot.
+
+        Creates new events on the given pad at each tick position in the
+        groove's tick list.  Returns the number of events added.
+        """
+        if groove.groove_type != "compound" or not groove.ticks:
+            return 0
+        self.push_undo_state()
+        for tick in groove.ticks:
+            self.events.append(Event(tick=tick, pad=pad, velocity=velocity))
+        self.events.sort(key=lambda event: event.tick)
+        self.dirty = True
+        return len(groove.ticks)
+
     def copy_slot(self):
         """Copy current slot events to clipboard."""
         self.slot_clipboard = [Event(event.tick, event.pad, event.velocity) for event in self.events]
@@ -438,8 +482,9 @@ class PatternModel:
         imported_events = []
         skipped_out_of_range = 0
         for tick, note, velocity in notes:
-            sp303_tick = int(tick * scale_factor)
+            sp303_tick = round(tick * scale_factor)
             mapped_note = note + transpose_shift
+
             if 60 <= mapped_note <= 75:
                 pad = 0x10 + (mapped_note - 60)
             else:
@@ -451,22 +496,26 @@ class PatternModel:
         imported_events.sort(key=lambda event: event.tick)
 
         source_bars = 0.0
+        ticks_per_bar = 4 * INTERNAL_PPQN
         if imported_events:
-            source_bars = (imported_events[-1].tick / (4 * INTERNAL_PPQN)) + 1.0
+            source_bars = math.ceil((imported_events[-1].tick + 1) / ticks_per_bar)
 
-        max_ticks = MAX_PATTERN_LENGTH_BARS * 4 * INTERNAL_PPQN
+        max_ticks = MAX_PATTERN_LENGTH_BARS * ticks_per_bar
         truncated_event_count = 0
         truncated_bars = 0.0
         if imported_events:
             last_tick = imported_events[-1].tick
             if last_tick >= max_ticks:
-                source_bars = (last_tick / (4 * INTERNAL_PPQN)) + 1.0
                 truncated_bars = max(0.0, source_bars - MAX_PATTERN_LENGTH_BARS)
                 kept_events = [
                     event for event in imported_events if event.tick < max_ticks
                 ]
                 truncated_event_count = len(imported_events) - len(kept_events)
                 imported_events = kept_events
+                if imported_events:
+                    source_bars = math.ceil((imported_events[-1].tick + 1) / ticks_per_bar)
+                else:
+                    source_bars = 0.0
 
         self.push_undo_state()
         existing_count = len(self.events)
@@ -492,19 +541,16 @@ class PatternModel:
         fitted_events, density_truncated, _ = self._fit_events_to_tuple_capacity(
             candidate_events,
             total_length_ticks=total_length_ticks,
-        )
         self.events = fitted_events
         if self.events:
             imported_length_bars = max(
                 1,
                 min(
                     MAX_PATTERN_LENGTH_BARS,
-                    int(
-                        (max(event.tick for event in self.events) / (4 * INTERNAL_PPQN))
-                        + 0.999
-                    ),
+                    math.ceil((max(event.tick for event in self.events) + 1) / (4 * INTERNAL_PPQN))
                 ),
             )
+
         else:
             imported_length_bars = DEFAULT_PATTERN_LENGTH_BARS
         self._set_ptninfo_active_entry(

@@ -1,0 +1,70 @@
+{
+  "format": "sp303-pack",
+  "version": "2.0",
+  "type": "drum_machine",
+  "title": "Yamaha RX11",
+  "description": "Yamaha RX11 drum samples",
+  "metadata": {
+    "tags": [
+      "yamaha rx11",
+      "drum machine",
+      "samples"
+    ],
+    "sample_count": 8
+  },
+  "banks": {
+    "C": {
+      "role": "drums",
+      "encoding": "wav",
+      "description": "Yamaha RX11 drum kit",
+      "samples": [
+        {
+          "pad": 1,
+          "file": "C01_SMPL0001.wav",
+          "note": "Smpl0001"
+        },
+        {
+          "pad": 2,
+          "file": "C02_SMPL0002.wav",
+          "note": "Smpl0002"
+        },
+        {
+          "pad": 3,
+          "file": "C03_SMPL0003.wav",
+          "note": "Smpl0003"
+        },
+        {
+          "pad": 4,
+          "file": "C04_SMPL0004.wav",
+          "note": "Smpl0004"
+        },
+        {
+          "pad": 5,
+          "file": "C05_SMPL0005.wav",
+          "note": "Smpl0005"
+        },
+        {
+          "pad": 6,
+          "file": "C06_SMPL0006.wav",
+          "note": "Smpl0006"
+        },
+        {
+          "pad": 7,
+          "file": "C07_SMPL0007.wav",
+          "note": "Smpl0007"
+        },
+        {
+          "pad": 8,
+          "file": "C08_SMPL0008.wav",
+          "note": "Smpl0008"
+        }
+      ]
+    }
+  },
+  "build": {
+    "target": "boss-sp-303",
+    "normalize_wav": true,
+    "resample_to_44100": true,
+    "auto_pad_short_samples": true
+  }
+}
