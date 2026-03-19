@@ -36,6 +36,8 @@ PTNDATA_SIZE = 65536
 SLOT_COUNT = 16
 SLOT_SIZE = 0x400
 INTERNAL_PPQN = 96
+TICKS_PER_BAR = 4 * INTERNAL_PPQN
+MAX_PATTERN_EVENT_CAPACITY = 112
 
 # Quantize values
 QUANTIZE_VALUES = {
@@ -125,18 +127,39 @@ class GrooveLibrary:
                 self._attribution[machine] = attribution
                 templates = []
                 for g in data.get("grooves", []):
+                    groove_type = g.get("type", "grid")
+                    grid = g.get("grid", 0)
+                    offsets = g.get("offsets", [])
+                    ticks = g.get("ticks", [])
+                    if (
+                        groove_type == "grid"
+                        and grid > 0
+                        and any(abs(offset) > (grid / 2) for offset in offsets)
+                    ):
+                        groove_type = "compound"
+                        ticks = sorted(
+                            max(0, (step * grid) + offset)
+                            for step, offset in enumerate(offsets)
+                        )
+                        offsets = []
+                        log.warning(
+                            "Reclassified groove '%s' in %s from grid to compound: "
+                            "offset exceeded 50%% of grid size",
+                            g.get("name", "<unnamed>"),
+                            json_path.name,
+                        )
                     tmpl = GrooveTemplate(
                         name=g["name"],
-                        groove_type=g.get("type", "grid"),
+                        groove_type=groove_type,
                         machine=machine,
                         author=author,
                         ppqn=g.get("ppqn", INTERNAL_PPQN),
-                        grid=g.get("grid", 0),
+                        grid=grid,
                         grid_label=g.get("grid_label", ""),
                         steps_per_beat=g.get("steps_per_beat", 0),
                         beats=g.get("beats", 0),
-                        offsets=g.get("offsets", []),
-                        ticks=g.get("ticks", []),
+                        offsets=offsets,
+                        ticks=ticks,
                     )
                     templates.append(tmpl)
                 self._by_machine[machine] = templates
