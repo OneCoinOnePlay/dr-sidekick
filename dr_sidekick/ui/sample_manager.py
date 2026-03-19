@@ -308,7 +308,7 @@ def open_sample_manager(host: SampleManagerHost, smpinfo_path: Optional[Path] = 
         foreground=[("selected", "#ffffff")],
     )
 
-    columns = ("bank_pad", "source", "file", "long_lofi", "stereo", "length", "duration", "gate", "loop", "reverse")
+    columns = ("bank_pad", "source", "file", "long_lofi", "stereo", "length", "duration", "level", "gate", "loop", "reverse")
     tree = ttk.Treeview(frame, columns=columns, show="headings", height=14, style="CustomPad.Treeview")
     tree.heading("bank_pad", text="Pad")
     tree.heading("source", text="Source")
@@ -317,6 +317,7 @@ def open_sample_manager(host: SampleManagerHost, smpinfo_path: Optional[Path] = 
     tree.heading("stereo", text="Stereo")
     tree.heading("length", text="File Length")
     tree.heading("duration", text="Duration")
+    tree.heading("level", text="Level")
     tree.heading("gate", text="Gate")
     tree.heading("loop", text="Loop")
     tree.heading("reverse", text="Reverse")
@@ -327,6 +328,7 @@ def open_sample_manager(host: SampleManagerHost, smpinfo_path: Optional[Path] = 
     tree.column("stereo", width=66, anchor=tk.CENTER, stretch=False)
     tree.column("length", width=88, anchor=tk.E, stretch=False)
     tree.column("duration", width=86, anchor=tk.E, stretch=False)
+    tree.column("level", width=50, anchor=tk.CENTER, stretch=False)
     tree.column("gate", width=64, anchor=tk.CENTER, stretch=False)
     tree.column("loop", width=96, anchor=tk.CENTER, stretch=False)
     tree.column("reverse", width=74, anchor=tk.CENTER, stretch=False)
@@ -363,6 +365,8 @@ def open_sample_manager(host: SampleManagerHost, smpinfo_path: Optional[Path] = 
     rearrange_target_iid: Optional[str] = None
     rearrange_source_iid: Optional[str] = None
     slot_metadata: Dict[int, Dict[str, str]] = {}
+    level_state: Dict[int, int] = {}
+    baseline_level_state: Dict[int, int] = {}
     gate_state: Dict[int, bool] = {}
     baseline_gate_state: Dict[int, bool] = {}
     loop_state: Dict[int, bool] = {}
@@ -393,6 +397,12 @@ def open_sample_manager(host: SampleManagerHost, smpinfo_path: Optional[Path] = 
             after = current.get(slot, "-")
             if before != after:
                 lines.append(f"{slot_to_label(slot)}: {before} -> {after}")
+        for slot in range(SLOT_COUNT):
+            if slot in baseline_level_state:
+                before_level = baseline_level_state[slot]
+                after_level = level_state.get(slot, before_level)
+                if before_level != after_level:
+                    lines.append(f"{slot_to_label(slot)}: Level {before_level} -> {after_level}")
         for slot in range(SLOT_COUNT):
             if slot in baseline_gate_state:
                 before_gate = baseline_gate_state[slot]
@@ -457,6 +467,7 @@ def open_sample_manager(host: SampleManagerHost, smpinfo_path: Optional[Path] = 
                     meta.get("stereo", "-"),
                     meta.get("length", "-"),
                     meta.get("duration", "-"),
+                    meta.get("level", "-"),
                     meta.get("gate", "-"),
                     meta.get("loop", "-"),
                     meta.get("reverse", "-"),
@@ -551,6 +562,7 @@ def open_sample_manager(host: SampleManagerHost, smpinfo_path: Optional[Path] = 
             for slot in range(SLOT_COUNT):
                 session.clear_slot(slot)
             slot_metadata.clear()
+            level_state.clear()
             gate_state.clear()
             loop_state.clear()
             reverse_state.clear()
@@ -563,6 +575,7 @@ def open_sample_manager(host: SampleManagerHost, smpinfo_path: Optional[Path] = 
 
                 seconds = slot_record.sample_length_bytes / 33075.0
                 duration_text = f"{seconds:.2f}s" if seconds >= 1.0 else f"{seconds * 1000.0:.1f}ms"
+                level_state[slot] = slot_record.level
                 gate_state[slot] = slot_record.is_gate
                 loop_state[slot] = slot_record.is_loop
                 reverse_state[slot] = slot_record.is_reverse
@@ -571,6 +584,7 @@ def open_sample_manager(host: SampleManagerHost, smpinfo_path: Optional[Path] = 
                     "stereo": "Stereo" if slot_record.is_stereo else "Mono",
                     "length": f"{slot_record.sample_length_bytes:,} B",
                     "duration": duration_text,
+                    "level": str(slot_record.level),
                     "loop": "Loop" if slot_record.is_loop else "Off",
                     "reverse": "Reverse" if slot_record.is_reverse else "Off",
                     "gate": "Gate" if slot_record.is_gate else "Off",
@@ -588,6 +602,8 @@ def open_sample_manager(host: SampleManagerHost, smpinfo_path: Optional[Path] = 
 
             baseline_assignments.clear()
             baseline_assignments.update(current_assignment_snapshot())
+            baseline_level_state.clear()
+            baseline_level_state.update(level_state)
             baseline_gate_state.clear()
             baseline_gate_state.update(gate_state)
             baseline_loop_state.clear()
@@ -701,6 +717,19 @@ def open_sample_manager(host: SampleManagerHost, smpinfo_path: Optional[Path] = 
                                 "Skipped SMPINFO tail preservation because pad reassignment was detected."
                             )
                         smpinfo_out.write_bytes(merged)
+                if level_state and smpinfo_out.exists():
+                    patched = bytearray(smpinfo_out.read_bytes())
+                    block_size = 0x400
+                    num_blocks = len(patched) // block_size
+                    for slot, level_val in level_state.items():
+                        for blk in range(num_blocks):
+                            blk_start = blk * block_size
+                            if patched[blk_start:blk_start + 4] == b"\xff\xff\xff\xff":
+                                break
+                            byte_off = blk_start + slot * 48 + 35
+                            if byte_off < len(patched):
+                                patched[byte_off] = level_val & 0x7F
+                    smpinfo_out.write_bytes(patched)
                 if gate_state and smpinfo_out.exists():
                     patched = bytearray(smpinfo_out.read_bytes())
                     block_size = 0x400
@@ -759,9 +788,17 @@ def open_sample_manager(host: SampleManagerHost, smpinfo_path: Optional[Path] = 
                 confirm_text.configure(state=tk.DISABLED)
                 confirm_dialog.title("Write Complete")
                 host.update_status("Custom pad assignment complete")
+                if loaded_smpinfo_bytes and level_state:
+                    orig_smpinfo = SMPINFO.from_bytes(loaded_smpinfo_bytes)
+                    for s, new_level in level_state.items():
+                        orig_level = orig_smpinfo.slots[s].level
+                        if orig_level != new_level:
+                            log.info("%s: Level %d -> %d", slot_to_label(s), orig_level, new_level)
                 log.info("Write to card complete: %s", output_dir)
                 baseline_assignments.clear()
                 baseline_assignments.update(current_assignment_snapshot())
+                baseline_level_state.clear()
+                baseline_level_state.update(level_state)
                 baseline_gate_state.clear()
                 baseline_gate_state.update(gate_state)
                 baseline_loop_state.clear()
@@ -1038,6 +1075,12 @@ def open_sample_manager(host: SampleManagerHost, smpinfo_path: Optional[Path] = 
                 slot_metadata.pop(slot_b, None)
             else:
                 slot_metadata[slot_b] = meta_a
+        level_a = level_state.pop(slot_a, None)
+        level_b = level_state.pop(slot_b, None)
+        if level_b is not None:
+            level_state[slot_a] = level_b
+        if level_a is not None:
+            level_state[slot_b] = level_a
         gate_a = gate_state.pop(slot_a, False)
         gate_b = gate_state.pop(slot_b, False)
         if gate_b:
@@ -1074,7 +1117,57 @@ def open_sample_manager(host: SampleManagerHost, smpinfo_path: Optional[Path] = 
             return
         set_rearrange_target(row_id)
 
-    toggle_columns = {"#8": "gate", "#9": "loop", "#10": "reverse"}
+    LEVEL_COLUMN = "#8"
+    toggle_columns = {"#9": "gate", "#10": "loop", "#11": "reverse"}
+
+    def handle_level_edit(slot: int, col_id: str) -> None:
+        if col_id != LEVEL_COLUMN:
+            return
+        if loaded_smpinfo_path is None or slot not in slot_metadata:
+            return
+
+        def _open():
+            current_level = level_state.get(slot, 127)
+
+            popup = tk.Toplevel(dialog)
+            popup.title(f"{slot_to_label(slot)} Level")
+            popup.resizable(False, False)
+            popup.transient(dialog)
+            popup.configure(bg="#000000")
+            tk.Label(popup, text=f"{slot_to_label(slot)} Level (0-127):", bg="#000000", fg="#f0f0f0").pack(padx=10, pady=(10, 4))
+            entry = tk.Entry(popup, justify=tk.CENTER, width=8, bg="#1a1a1a", fg="#ffffff", insertbackground="#ffffff")
+            entry.insert(0, str(current_level))
+            entry.select_range(0, tk.END)
+            entry.pack(padx=10, pady=4)
+
+            def on_ok(event=None):
+                try:
+                    val = int(entry.get())
+                    val = max(0, min(127, val))
+                except ValueError:
+                    return
+                level_state[slot] = val
+                slot_metadata[slot]["level"] = str(val)
+                popup.grab_release()
+                popup.destroy()
+                refresh_tree()
+                host.update_status(f"{slot_to_label(slot)} Level: {val}")
+
+            def on_cancel():
+                popup.grab_release()
+                popup.destroy()
+
+            btn_frame = ttk.Frame(popup)
+            btn_frame.pack(pady=(4, 10))
+            ttk.Button(btn_frame, text="OK", width=8, command=on_ok).pack(side=tk.LEFT, padx=4)
+            ttk.Button(btn_frame, text="Cancel", width=8, command=on_cancel).pack(side=tk.LEFT, padx=4)
+            entry.bind("<Return>", on_ok)
+            entry.bind("<Escape>", lambda e: on_cancel())
+            popup.protocol("WM_DELETE_WINDOW", on_cancel)
+            popup.grab_set()
+            entry.focus_set()
+
+        dialog.after(50, _open)
 
     def handle_cell_toggle(slot: int, col_id: str) -> None:
         field = toggle_columns.get(col_id)
@@ -1111,7 +1204,9 @@ def open_sample_manager(host: SampleManagerHost, smpinfo_path: Optional[Path] = 
         elif rearrange_source_iid:
             row_id = tree.identify_row(event.y)
             col_id = tree.identify_column(event.x)
-            if row_id and row_id == rearrange_source_iid and col_id in toggle_columns:
+            if row_id and row_id == rearrange_source_iid and col_id == LEVEL_COLUMN:
+                handle_level_edit(int(row_id), col_id)
+            elif row_id and row_id == rearrange_source_iid and col_id in toggle_columns:
                 handle_cell_toggle(int(row_id), col_id)
         rearrange_source_iid = None
         set_rearrange_target(None)
