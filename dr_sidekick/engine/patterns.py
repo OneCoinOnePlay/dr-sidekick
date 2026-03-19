@@ -13,12 +13,14 @@ from dr_sidekick.ui.constants import PAD_ORDER
 from .core import (
     DEFAULT_PATTERN_LENGTH_BARS,
     INTERNAL_PPQN,
+    MAX_PATTERN_EVENT_CAPACITY,
     MAX_PATTERN_LENGTH_BARS,
     PROJECT_ROOT,
     PTNData,
     PTNInfo,
     PatternSlot,
     SLOT_COUNT,
+    TICKS_PER_BAR,
     TUPLE_ZONE_MAX_BYTES,
     Event,
     GrooveTemplate,
@@ -140,6 +142,23 @@ class PatternModel:
         else:
             self.events = []
 
+    def _bars_for_events(self, events: List[Event]) -> int:
+        """Return a deterministic 96 PPQN bar count for the current events."""
+        if not events:
+            return DEFAULT_PATTERN_LENGTH_BARS
+        last_tick = max(event.tick for event in events)
+        return max(
+            1,
+            min(
+                MAX_PATTERN_LENGTH_BARS,
+                math.ceil((last_tick + 1) / TICKS_PER_BAR),
+            ),
+        )
+
+    def _total_length_ticks_for_bars(self, bars: int) -> int:
+        bars = max(1, min(MAX_PATTERN_LENGTH_BARS, round(bars)))
+        return max(1, bars * TICKS_PER_BAR)
+
     def get_pattern_length_bars(self) -> int:
         """Calculate pattern length in bars from events."""
         ptninfo_length = self.get_ptninfo_length_bars(self.current_slot)
@@ -149,9 +168,7 @@ class PatternModel:
         if not self.events:
             return DEFAULT_PATTERN_LENGTH_BARS
 
-        last_tick = max(event.tick for event in self.events)
-        bars = int((last_tick / (4 * INTERNAL_PPQN)) + 0.999)
-        return max(1, min(bars, MAX_PATTERN_LENGTH_BARS))
+        return self._bars_for_events(self.events)
 
     def get_ptninfo_length_bars(self, slot_index: int) -> Optional[int]:
         """Return per-slot length from PTNINFO active entry byte when available."""
@@ -197,7 +214,7 @@ class PatternModel:
 
         if self.events:
             self.events.sort(key=lambda event: event.tick)
-            total_length_ticks = max(1, length_bars * 4 * INTERNAL_PPQN)
+            total_length_ticks = self._total_length_ticks_for_bars(length_bars)
             fitted_events, truncated_events, fitted_total_length_ticks = (
                 self._fit_events_to_tuple_capacity(
                     self.events,
@@ -207,8 +224,8 @@ class PatternModel:
             if truncated_events > 0:
                 self.events = fitted_events
                 self.last_save_warning = (
-                    "Current pattern was too dense for SP-303 storage. "
-                    f"Truncated {truncated_events} event(s) to fit device limits."
+                    "CAPACITY EXCEEDED: current pattern exceeds SP-303 storage limits. "
+                    f"Removed {truncated_events} trailing event(s) to fit the 112-event / tuple capacity."
                 )
 
             self.ptndata.write_pattern(
@@ -221,7 +238,7 @@ class PatternModel:
                 1,
                 min(
                     MAX_PATTERN_LENGTH_BARS,
-                    int((fitted_total_length_ticks - 1) / (4 * INTERNAL_PPQN)) + 1,
+                    math.ceil(fitted_total_length_ticks / TICKS_PER_BAR),
                 ),
             )
             self._set_ptninfo_active_entry(
@@ -247,25 +264,25 @@ class PatternModel:
         def encoded_len(prefix: List[Event]) -> int:
             if not prefix:
                 return 0
-            prefix_last_tick = prefix[-1].tick
-            effective_total_ticks = max(1, min(total_length_ticks, prefix_last_tick + 1))
             return len(
                 self.ptndata.encode_events(
                     prefix,
-                    total_length_ticks=effective_total_ticks,
+                    total_length_ticks=total_length_ticks,
                 )
             )
 
-        serialized_len = encoded_len(events)
-        if serialized_len <= TUPLE_ZONE_MAX_BYTES:
-            fitted_total_ticks = max(1, min(total_length_ticks, events[-1].tick + 1))
-            return events, 0, fitted_total_ticks
+        capped_events = events[:MAX_PATTERN_EVENT_CAPACITY]
+        truncated_events = len(events) - len(capped_events)
 
-        low, high = 1, len(events)
+        serialized_len = encoded_len(capped_events)
+        if serialized_len <= TUPLE_ZONE_MAX_BYTES:
+            return capped_events, truncated_events, max(1, total_length_ticks)
+
+        low, high = 1, len(capped_events)
         fit_count = 0
         while low <= high:
             mid = (low + high) // 2
-            mid_len = encoded_len(events[:mid])
+            mid_len = encoded_len(capped_events[:mid])
             if mid_len <= TUPLE_ZONE_MAX_BYTES:
                 fit_count = mid
                 low = mid + 1
@@ -273,22 +290,20 @@ class PatternModel:
                 high = mid - 1
 
         if fit_count > 0:
-            fitted = events[:fit_count]
-            fitted_total_ticks = max(1, min(total_length_ticks, fitted[-1].tick + 1))
-            return fitted, len(events) - fit_count, fitted_total_ticks
+            fitted = capped_events[:fit_count]
+            return fitted, truncated_events + (len(capped_events) - fit_count), max(1, total_length_ticks)
 
-        first = events[0]
+        first = capped_events[0]
         fallback = [Event(tick=0, pad=first.pad, velocity=first.velocity)]
-        fallback_total_ticks = 1
         fallback_len = len(
             self.ptndata.encode_events(
                 fallback,
-                total_length_ticks=fallback_total_ticks,
+                total_length_ticks=max(1, total_length_ticks),
             )
         )
         if fallback_len <= TUPLE_ZONE_MAX_BYTES:
-            return fallback, max(0, len(events) - 1), fallback_total_ticks
-        return [], len(events), 1
+            return fallback, max(0, len(events) - 1), max(1, total_length_ticks)
+        return [], len(events), max(1, total_length_ticks)
 
     def clear_slot(self):
         """Clear current slot."""
@@ -427,7 +442,7 @@ class PatternModel:
             else:
                 events = []
                 for index, pad in enumerate(pads):
-                    tick = int(round(index * (total_ticks - 1) / (steps - 1)))
+                    tick = round(index * (total_ticks - 1) / (steps - 1))
                     events.append(Event(tick=tick, pad=pad, velocity=0x7F))
 
             self.ptndata.write_pattern(slot, events, total_length_ticks=total_ticks)
@@ -496,11 +511,10 @@ class PatternModel:
         imported_events.sort(key=lambda event: event.tick)
 
         source_bars = 0.0
-        ticks_per_bar = 4 * INTERNAL_PPQN
         if imported_events:
-            source_bars = math.ceil((imported_events[-1].tick + 1) / ticks_per_bar)
+            source_bars = self._bars_for_events(imported_events)
 
-        max_ticks = MAX_PATTERN_LENGTH_BARS * ticks_per_bar
+        max_ticks = MAX_PATTERN_LENGTH_BARS * TICKS_PER_BAR
         truncated_event_count = 0
         truncated_bars = 0.0
         if imported_events:
@@ -513,7 +527,7 @@ class PatternModel:
                 truncated_event_count = len(imported_events) - len(kept_events)
                 imported_events = kept_events
                 if imported_events:
-                    source_bars = math.ceil((imported_events[-1].tick + 1) / ticks_per_bar)
+                    source_bars = self._bars_for_events(imported_events)
                 else:
                     source_bars = 0.0
 
@@ -531,26 +545,17 @@ class PatternModel:
 
         total_length_ticks = 1
         if candidate_events:
-            total_length_ticks = max(
-                1,
-                min(
-                    max_ticks,
-                    max(event.tick for event in candidate_events) + 1,
-                ),
+            total_length_ticks = min(
+                max_ticks,
+                self._total_length_ticks_for_bars(self._bars_for_events(candidate_events)),
             )
         fitted_events, density_truncated, _ = self._fit_events_to_tuple_capacity(
             candidate_events,
             total_length_ticks=total_length_ticks,
+        )
         self.events = fitted_events
         if self.events:
-            imported_length_bars = max(
-                1,
-                min(
-                    MAX_PATTERN_LENGTH_BARS,
-                    math.ceil((max(event.tick for event in self.events) + 1) / (4 * INTERNAL_PPQN))
-                ),
-            )
-
+            imported_length_bars = self._bars_for_events(self.events)
         else:
             imported_length_bars = DEFAULT_PATTERN_LENGTH_BARS
         self._set_ptninfo_active_entry(
@@ -581,7 +586,7 @@ class PatternModel:
 
     def set_current_slot_length_bars(self, bars: int):
         """Update PTNINFO length byte for current slot without altering mapping."""
-        bars = max(1, min(MAX_PATTERN_LENGTH_BARS, int(bars)))
+        bars = max(1, min(MAX_PATTERN_LENGTH_BARS, round(bars)))
         mapping_index = self.get_mapping_index(self.current_slot)
         if mapping_index is None:
             mapping_index = self.current_slot + 1
@@ -614,7 +619,7 @@ class PatternModel:
             "1/16T": 0x05,
         }
         if active_value is not None:
-            quant_byte = max(0, min(0x63, int(active_value)))
+            quant_byte = max(0, min(0x63, round(active_value)))
         else:
             quant_byte = quant_map.get(quantize, 0x00)
         if mapping_index is None:

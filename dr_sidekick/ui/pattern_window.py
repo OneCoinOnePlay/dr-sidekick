@@ -570,7 +570,7 @@ AVAILABLE MACHINES
 
             # Calculate actual length from events
             last_tick = max(e.tick for e in self.model.events)
-            actual_length = last_tick / (4 * INTERNAL_PPQN)
+            actual_length = (last_tick + 1) / (4 * INTERNAL_PPQN)
 
             status_text = f"Pattern: {slot_label} - {event_count} events, {actual_length:.1f} bars, {pads_used} pads{mapping_text}"
 
@@ -846,7 +846,7 @@ AVAILABLE MACHINES
             )
             return
         if self.model.last_save_warning:
-            messagebox.showwarning("Pattern Truncated", self.model.last_save_warning)
+            messagebox.showwarning("CAPACITY EXCEEDED", self.model.last_save_warning)
             self.model.last_save_warning = None
 
         # Update pattern length from events
@@ -1733,7 +1733,7 @@ AVAILABLE MACHINES
         event_count = len(self.model.events)
         first_tick = min(e.tick for e in self.model.events)
         last_tick = max(e.tick for e in self.model.events)
-        pattern_length_ticks = last_tick - first_tick
+        pattern_length_ticks = (last_tick - first_tick) + 1
         pattern_length_bars = pattern_length_ticks / (4 * INTERNAL_PPQN)
 
         # Pads used
