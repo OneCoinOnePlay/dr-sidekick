@@ -637,14 +637,7 @@ AVAILABLE MACHINES
         label_by_slot = {}
         for slot in range(16):
             label = self.slot_labels[slot]
-            mapping_index = self.model.get_mapping_index(slot)
-            events = []
-            if mapping_index is not None and 1 <= mapping_index <= 16:
-                mapped_slot = mapping_index - 1
-                events = self.model.ptndata.decode_events(mapped_slot)
-            else:
-                events = self.model.ptndata.decode_events(slot)
-            if events:
+            if self.model.slot_has_pattern(slot):
                 label = f"*{label}"
             labels.append(label)
             label_by_slot[slot] = label
