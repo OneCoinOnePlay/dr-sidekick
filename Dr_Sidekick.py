@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Dr. Sidekick - Standalone graphical pattern editor and SmartMedia librarian for the BOSS Dr. Sample SP-303
-==========================================================================================================
+Dr. Sidekick - Pattern sequencer and SmartMedia librarian for the BOSS Dr. Sample SP-303
+========================================================================================
 
 Disclaimer: Dr. Sidekick is an independent community project and is not affiliated with, endorsed by, or supported by Roland Corporation or BOSS
 
