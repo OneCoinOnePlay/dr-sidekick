@@ -299,6 +299,8 @@ Step 3 — Program the pattern.
   Click pad rows to place hits. Drag to move. Right-click to delete.
   Set bar length with the Pattern Length spinner.
   Adjust velocity by selecting notes and using [ / ] keys.
+  Keep device limits in mind: the SP-303 has a nominal 112-event cap
+  per pattern slot, but dense timing can fit fewer once encoded.
 
   Alternatively, import your own MIDI file:
   Patterns -> Import MIDI File... -> select your file.
