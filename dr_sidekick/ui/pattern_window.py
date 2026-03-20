@@ -13,6 +13,7 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, simpledialog, ttk
 from typing import Dict, List, Optional, Tuple, TYPE_CHECKING
 
+from dr_sidekick import APP_VERSION
 from dr_sidekick.engine import (
     DEFAULT_PATTERN_LENGTH_BARS,
     GrooveLibrary,
@@ -59,7 +60,7 @@ class PatternSequencerWindow:
         # Model
         self.model = PatternModel()
         self.groove_library = GrooveLibrary()
-        self.current_palette = "Apple Green"
+        self.current_palette = "High Contrast (White on Black)"
         self.slot_combo: Optional[ttk.Combobox] = None
         self.active_workflow = "Patterns"
         self.loaded_card_context = "Not loaded"
@@ -83,8 +84,9 @@ class PatternSequencerWindow:
         self.root.bind("<Control-z>", lambda e: self.on_undo())
         self.root.bind("<Control-Shift-Z>", lambda e: self.on_redo())
         self.root.bind("<Control-a>", lambda e: self.on_select_all())
-        self.root.bind("<Control-Shift-C>", lambda e: self.on_copy_slot())
-        self.root.bind("<Control-Shift-V>", lambda e: self.on_paste_slot())
+        self.root.bind("<Control-x>", lambda e: self.on_cut_slot())
+        self.root.bind("<Control-c>", lambda e: self.on_copy_slot())
+        self.root.bind("<Control-v>", lambda e: self.on_paste_slot())
         self.root.bind("<Control-q>", lambda e: self.on_exit())
         self.root.bind("<Escape>", lambda e: self.on_clear_selection())
         self.root.bind("<d>", self.on_delete_key_root)
@@ -125,21 +127,25 @@ class PatternSequencerWindow:
         # File menu
         self.file_menu = tk.Menu(menubar, tearoff=0)
         menubar.add_cascade(label="File", menu=self.file_menu)
-        self.file_menu.add_command(label="New Pattern Files", command=self.on_new, accelerator="Ctrl+N")
-        self.file_menu.add_command(label="Open Pattern Files...", command=self.on_open, accelerator="Ctrl+O")
-        self.file_menu.add_separator()
+        self.file_menu.add_command(label="New", command=self.on_new, accelerator="Ctrl+N")
+        self.file_menu.add_command(label="Open...", command=self.on_open, accelerator="Ctrl+O")
 
-        # Recent files section (will be populated by update_recent_files_menu)
-        self.recent_files_menu_start_index = self.file_menu.index("end") + 1
+        self.recent_files_menu = tk.Menu(self.file_menu, tearoff=0)
+        self.file_menu.add_cascade(label="Open Recent", menu=self.recent_files_menu)
+        self.update_recent_files_menu()
 
         self.file_menu.add_separator()
         self.file_menu.add_command(label="Save", command=self.on_save, accelerator="Ctrl+S")
         self.file_menu.add_command(label="Save As...", command=self.on_save_as, accelerator="Ctrl+Shift+S")
         self.file_menu.add_separator()
-        self.file_menu.add_command(label="Close Pattern Sequencer", command=self.on_exit, accelerator="Ctrl+Q")
-
-        # Initialize recent files menu
-        self.update_recent_files_menu()
+        import_menu = tk.Menu(self.file_menu, tearoff=0)
+        import_menu.add_command(label="MIDI File...", command=self.on_import_midi)
+        import_menu.add_command(label="MIDI Files (Batch)...", command=self.on_import_multiple_midi)
+        self.file_menu.add_cascade(label="Import", menu=import_menu)
+        self.file_menu.add_separator()
+        self.file_menu.add_command(label="Properties...", command=self.on_pattern_info)
+        self.file_menu.add_separator()
+        self.file_menu.add_command(label="Close", command=self.on_exit, accelerator="Ctrl+Q")
 
         # Edit menu
         edit_menu = tk.Menu(menubar, tearoff=0)
@@ -147,19 +153,26 @@ class PatternSequencerWindow:
         edit_menu.add_command(label="Undo", command=self.on_undo, accelerator="Ctrl+Z")
         edit_menu.add_command(label="Redo", command=self.on_redo, accelerator="Ctrl+Shift+Z")
         edit_menu.add_separator()
+        edit_menu.add_command(label="Cut", command=self.on_cut_slot, accelerator="Ctrl+X")
+        edit_menu.add_command(label="Copy", command=self.on_copy_slot, accelerator="Ctrl+C")
+        edit_menu.add_command(label="Paste", command=self.on_paste_slot, accelerator="Ctrl+V")
         edit_menu.add_command(label="Delete", command=self.on_delete, accelerator="Del")
+        edit_menu.add_separator()
         edit_menu.add_command(label="Select All", command=self.on_select_all, accelerator="Ctrl+A")
         edit_menu.add_separator()
-        edit_menu.add_command(label="Copy Pattern", command=self.on_copy_slot, accelerator="Ctrl+Shift+C")
-        edit_menu.add_command(label="Paste Pattern", command=self.on_paste_slot, accelerator="Ctrl+Shift+V")
-        edit_menu.add_separator()
-        edit_menu.add_command(label="Reassign Pad...", command=self.on_reassign_pad)
-        edit_menu.add_command(label="Quantize Selected...", command=self.on_quantize_selected)
-        edit_menu.add_command(label="Apply Groove...", command=self.on_apply_groove)
-        edit_menu.add_command(label="Stamp Pattern...", command=self.on_stamp_pattern)
-        edit_menu.add_command(label="Set Velocity...", command=self.on_set_velocity)
-        edit_menu.add_separator()
         edit_menu.add_command(label="Clear Pattern", command=self.on_clear_slot)
+        edit_menu.add_separator()
+        transform_menu = tk.Menu(edit_menu, tearoff=0)
+        transform_menu.add_command(label="Quantize...", command=self.on_quantize_selected)
+        transform_menu.add_command(label="Apply Groove...", command=self.on_apply_groove)
+        transform_menu.add_command(label="Set Velocity...", command=self.on_set_velocity)
+        transform_menu.add_command(label="Reassign Pad...", command=self.on_reassign_pad)
+        edit_menu.add_cascade(label="Transform", menu=transform_menu)
+        edit_menu.add_command(label="Stamp Pattern...", command=self.on_stamp_pattern)
+        edit_menu.add_command(label="Exchange Patterns...", command=self.on_exchange_slots)
+        if self.debug_mode:
+            edit_menu.add_separator()
+            edit_menu.add_command(label="Generate Test Data...", command=self.on_generate_test_data)
 
         # View menu
         view_menu = tk.Menu(menubar, tearoff=0)
@@ -181,28 +194,13 @@ class PatternSequencerWindow:
                 command=lambda name=palette_name: self.on_palette_changed(name)
             )
 
-        # Pattern menu (NEW!)
-        pattern_menu = tk.Menu(menubar, tearoff=0)
-        menubar.add_cascade(label="Patterns", menu=pattern_menu)
-        pattern_menu.add_command(label="Import MIDI File...", command=self.on_import_midi)
-        pattern_menu.add_command(label="Import MIDI Files (Batch)...", command=self.on_import_multiple_midi)
-        if self.debug_mode:
-            pattern_menu.add_separator()
-            pattern_menu.add_command(label="Generate Test Data...", command=self.on_generate_test_data)
-        pattern_menu.add_separator()
-        pattern_menu.add_command(label="Exchange Patterns...", command=self.on_exchange_slots)
-        pattern_menu.add_separator()
-        pattern_menu.add_command(label="Add Groove Pattern...", command=self.on_add_groove_pattern_card)
-        pattern_menu.add_separator()
-        pattern_menu.add_command(label="Pattern Info", command=self.on_pattern_info)
-
-        self.pattern_menu = pattern_menu
-
         # Help menu
         help_menu = tk.Menu(menubar, tearoff=0)
         menubar.add_cascade(label="Help", menu=help_menu)
         help_menu.add_command(label="Keyboard Shortcuts", command=self.on_show_shortcuts)
-        help_menu.add_command(label="Grooves & Patterns", command=self.on_show_groove_help)
+        help_menu.add_command(label="Grooves & Patterns Help", command=self.on_show_groove_help)
+        help_menu.add_separator()
+        help_menu.add_command(label="About", command=self.on_about)
 
 
     def on_show_shortcuts(self):
@@ -233,23 +231,24 @@ class PatternSequencerWindow:
 
         sections = [
             ("FILE", [
-                ("Ctrl+N",        "New Pattern"),
-                ("Ctrl+O",        "Open Pattern"),
+                ("Ctrl+N",        "New"),
+                ("Ctrl+O",        "Open"),
                 ("Ctrl+S",        "Save"),
                 ("Ctrl+Shift+S",  "Save As"),
-                ("Ctrl+Q",        "Close Pattern Sequencer"),
+                ("Ctrl+Q",        "Close"),
             ]),
             ("EDIT", [
                 ("Ctrl+Z",        "Undo"),
                 ("Ctrl+Shift+Z",  "Redo"),
+                ("Ctrl+X",        "Cut Pattern"),
+                ("Ctrl+C",        "Copy Pattern"),
+                ("Ctrl+V",        "Paste Pattern"),
                 ("Ctrl+A",        "Select All"),
                 ("Esc",           "Clear row/event selection"),
                 ("D / Del / Bksp","Delete Selected"),
                 ("Right-Click",   "Delete Event"),
                 ("[",             "Decrease Velocity"),
                 ("]",             "Increase Velocity"),
-                ("Ctrl+Shift+C",  "Copy Pattern"),
-                ("Ctrl+Shift+V",  "Paste Pattern"),
             ]),
             ("VIEW", [
                 ("Ctrl++",        "Zoom In"),
@@ -269,7 +268,7 @@ class PatternSequencerWindow:
                 ("Click Row Header", "Select all events on a pad row such as C1"),
                 ("Click Row Again",  "Deselect the highlighted row"),
                 ("Double-Click Row", "Open Reassign Pad for that source row"),
-                ("Edit > Reassign Pad...", "Move the selected row or single-pad selection to another pad"),
+                ("Edit > Transform > Reassign Pad...", "Move the selected row or single-pad selection to another pad"),
             ]),
         ]
 
@@ -345,7 +344,7 @@ events on that pad lane.
   Double-clicking a row header opens Reassign Pad for that row.
 
 
-REASSIGN PAD  (Edit > Reassign Pad...)
+REASSIGN PAD  (Edit > Transform > Reassign Pad...)
 --------------------------------------
 
 Moves notes from one pad to another without changing timing or
@@ -353,7 +352,7 @@ velocity.
 
   How to use:
     1. Click a row header such as C1
-    2. Choose Edit > Reassign Pad...
+    2. Choose Edit > Transform > Reassign Pad...
     3. Pick a destination pad such as C2
     4. Click Apply
 
@@ -365,7 +364,7 @@ velocity.
       merged onto that pad.
 
 
-APPLY GROOVE  (Edit > Apply Groove)
+APPLY GROOVE  (Edit > Transform > Apply Groove...)
 -----------------------------------
 
 Shifts the timing of selected events to match a machine's swing
@@ -374,7 +373,7 @@ only their timing changes.
 
   How to use:
     1. Select the events you want to affect (Ctrl+A for all)
-    2. Edit > Apply Groove
+    2. Edit > Transform > Apply Groove...
     3. Choose a machine, then a groove
     4. Click Apply (or double-click the groove)
 
@@ -391,10 +390,10 @@ only their timing changes.
 
   Tip: Apply Groove works best on events that are already close to
   a grid. If your notes are freeform, quantise them first
-  (Edit > Quantize Selected).
+  (Edit > Transform > Quantize...).
 
 
-STAMP PATTERN  (Edit > Stamp Pattern)
+STAMP PATTERN  (Edit > Stamp Pattern...)
 --------------------------------------
 
 Adds a rhythmic pattern to the current slot on a chosen pad.
@@ -402,7 +401,7 @@ Unlike Apply Groove, this creates new events — it does not move
 existing ones.
 
   How to use:
-    1. Edit > Stamp Pattern
+    1. Edit > Stamp Pattern...
     2. Choose a machine and a pattern (Grid or Compound)
     3. Pick a target pad (e.g. A1)
     4. Click Stamp
@@ -423,6 +422,67 @@ AVAILABLE MACHINES
 {chr(10).join(lines)}
 """
         show_text_dialog(self.root, "Grooves & Patterns", content, "580x720")
+
+    def on_about(self):
+        """Show about dialog."""
+        about = tk.Toplevel(self.root)
+        about.title("About Dr. Sidekick")
+        about.geometry("620x340")
+        about.resizable(False, False)
+        about.transient(self.root)
+        about.grab_set()
+        about.configure(bg="#000000")
+
+        container = tk.Frame(about, bg="#000000", padx=16, pady=16)
+        container.pack(fill=tk.BOTH, expand=True)
+
+        tk.Label(
+            container,
+            text=f"Dr. Sidekick v{APP_VERSION}",
+            font=("", 14, "bold"),
+            bg="#000000",
+            fg="#ffffff",
+            anchor="w",
+            justify=tk.LEFT,
+        ).pack(anchor=tk.W)
+
+        tk.Label(
+            container,
+            text="Standalone graphical pattern editor and SmartMedia librarian for the BOSS Dr. Sample SP-303",
+            wraplength=580,
+            justify=tk.LEFT,
+            bg="#000000",
+            fg="#ffffff",
+            anchor="w",
+        ).pack(anchor=tk.W, pady=(8, 10))
+
+        contacts = (
+            "Author: One Coin One Play\n\n"
+            "github.com/OneCoinOnePlay\n"
+            "soundcloud.com/one_coin_one_play\n"
+            "instagram.com/one_coin_one_play\n"
+            "linkedin.com/in/onecoinoneplay\n"
+            "x.com/OneCoinOnePlay\n"
+            "youtube.com/@1coin1play"
+        )
+        tk.Label(
+            container,
+            text=contacts,
+            justify=tk.LEFT,
+            bg="#000000",
+            fg="#ffffff",
+            anchor="w",
+        ).pack(anchor=tk.W, pady=(0, 14))
+
+        tk.Label(
+            container,
+            text="Disclaimer: Dr. Sidekick is an independent community project and is not affiliated with, endorsed by, or supported by Roland Corporation or BOSS.",
+            wraplength=580,
+            justify=tk.LEFT,
+            bg="#000000",
+            fg="#cccccc",
+            anchor="w",
+        ).pack(anchor=tk.W)
 
     def _create_toolbar(self):
         """Create toolbar"""
@@ -1937,6 +1997,19 @@ AVAILABLE MACHINES
         pattern_label = self.slot_index_to_label(self.model.current_slot)
         self.update_status(f"Copied pattern {pattern_label} ({event_count} events)")
 
+    def on_cut_slot(self):
+        """Cut current slot to clipboard."""
+        self.model.copy_slot()
+        event_count = len(self.model.slot_clipboard) if self.model.slot_clipboard else 0
+        pattern_label = self.slot_index_to_label(self.model.current_slot)
+        self.model.clear_slot()
+        self.canvas.selected_events.clear()
+        self.canvas.selected_pad_row = None
+        self.canvas.redraw()
+        self.update_lane_labels()
+        self.refresh_slot_labels()
+        self.update_status(f"Cut pattern {pattern_label} ({event_count} events)")
+
     def on_paste_slot(self):
         """Paste to current slot"""
         if self.model.slot_clipboard is None:
@@ -1955,7 +2028,7 @@ AVAILABLE MACHINES
     def on_pattern_info(self):
         """Show pattern info"""
         if not self.model.events:
-            messagebox.showinfo("Pattern Info", "Current pattern is empty")
+            messagebox.showinfo("Properties", "Current pattern is empty")
             return
 
         # Calculate pattern info
@@ -1978,7 +2051,7 @@ AVAILABLE MACHINES
 
         # Build info text
         slot_label = self.slot_var.get()
-        info_text = f"""Pattern {slot_label} Info:
+        info_text = f"""Pattern {slot_label} Properties:
 
 Events: {event_count}
 Loop Length: {loop_length_bars:.2f} bars ({loop_length_ticks} ticks)
@@ -1995,7 +2068,7 @@ Velocity:
   Average: {avg_vel}
 """
 
-        messagebox.showinfo("Pattern Info", info_text)
+        messagebox.showinfo("Properties", info_text)
 
     def on_exchange_slots(self):
         """Exchange PTNINFO slot mappings."""
@@ -2130,36 +2203,19 @@ Velocity:
         self.update_recent_files_menu()
 
     def update_recent_files_menu(self):
-        """Update recent files in File menu"""
-        # Remove existing recent file entries
-        # Delete items between the "Open..." command and the next separator
-        try:
-            # Count items to delete (from start index to next separator)
-            delete_count = 0
-            for i in range(self.recent_files_menu_start_index, self.file_menu.index("end") + 1):
-                try:
-                    if self.file_menu.type(i) == "separator":
-                        break
-                    delete_count += 1
-                except tk.TclError:
-                    break
+        """Update recent files submenu."""
+        self.recent_files_menu.delete(0, tk.END)
 
-            # Delete the items
-            for _ in range(delete_count):
-                self.file_menu.delete(self.recent_files_menu_start_index)
-        except tk.TclError:
-            pass  # Menu might not be fully initialized yet
+        if not self.recent_files:
+            self.recent_files_menu.add_command(label="No Recent Files", state=tk.DISABLED)
+            return
 
-        # Add recent files if any exist
-        if self.recent_files:
-            for i, path in enumerate(self.recent_files):
-                # Show shortened path (parent directory name + filename)
-                display_name = f"{path.parent.name}/{path.name}"
-                self.file_menu.insert_command(
-                    self.recent_files_menu_start_index + i,
-                    label=f"{i + 1}. {display_name}",
-                    command=lambda p=path: self.open_recent_file(p)
-                )
+        for i, path in enumerate(self.recent_files):
+            display_name = f"{path.parent.name}/{path.name}"
+            self.recent_files_menu.add_command(
+                label=f"{i + 1}. {display_name}",
+                command=lambda p=path: self.open_recent_file(p),
+            )
 
     def open_recent_file(self, ptninfo_path: Path):
         """Open a recent file"""

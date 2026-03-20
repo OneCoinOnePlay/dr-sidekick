@@ -240,12 +240,12 @@ Open the Pattern Sequencer: File -> Open Pattern Sequencer (or Ctrl+Shift+L).
     Adjust velocity by selecting notes and using the [ / ] keys.
     Save with Ctrl+S.
 
-  • Import a MIDI file: Patterns -> Import MIDI File...
+  • Import a MIDI file: File -> Import -> MIDI File...
 
-  • Apply a groove: Patterns -> Add Groove Pattern...
+  • Apply a groove to selected notes: Edit -> Transform -> Apply Groove...
 
   • Copy or exchange patterns between slots:
-    Edit -> Copy Pattern / Paste Pattern, or Patterns -> Exchange Patterns...
+    Edit -> Copy / Paste, or Edit -> Exchange Patterns...
 
 
 WORK ON SAMPLES
@@ -303,11 +303,11 @@ Step 3 — Program the pattern.
   per pattern slot, but dense timing can fit fewer once encoded.
 
   Alternatively, import your own MIDI file:
-  Patterns -> Import MIDI File... -> select your file.
+  File -> Import -> MIDI File... -> select your file.
   Review events in the editor and adjust as needed.
 
   Optionally apply a groove:
-  Patterns -> Add Groove Pattern... -> select your groove file.
+  Select the notes, then choose Edit -> Transform -> Apply Groove...
 
 Step 4 — Save and load onto the SP-303.
   File -> Save (Ctrl+S).
@@ -364,7 +364,7 @@ Step 3 — Reassign pads.
   The status bar confirms every change.
 
 Step 4 — Remap or exchange patterns.
-  In the Pattern Sequencer use Edit -> Copy Pattern / Paste Pattern
+  In the Pattern Sequencer use Edit -> Copy / Paste
   to move patterns between slots without re-programming.
 
 Step 5 — Write changes.
