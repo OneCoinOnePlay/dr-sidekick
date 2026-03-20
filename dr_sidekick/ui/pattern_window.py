@@ -410,6 +410,9 @@ existing ones.
   - Compound Patterns are raw musical performances (e.g. flams, rolls).
   - Grid Grooves create a straight rhythmic grid using that machine's
     timing feel (e.g. a steady 16th note hi-hat).
+  - SP-303 capacity note: a pattern slot has a nominal 112-event cap,
+    but dense timing can fit fewer once encoded for the hardware.
+  - If Stamp reports "too dense," shorten the pattern or reduce hits.
 
   This is undoable (Ctrl+Z).
 
