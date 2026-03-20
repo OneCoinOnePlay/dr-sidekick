@@ -31,6 +31,7 @@ GRID_SNAPS = {
 COLOR_PALETTES = {
     "Dark": {
         "background": "#1a1a1a",
+        "grid_bar": "#555555",
         "grid_major": "#333333",
         "grid_minor": "#222222",
         "ruler_bg": "#252525",
@@ -64,6 +65,7 @@ COLOR_PALETTES = {
     },
     "High Contrast (White on Black)": {
         "background": "#000000",
+        "grid_bar": "#666666",
         "grid_major": "#444444",
         "grid_minor": "#222222",
         "ruler_bg": "#0a0a0a",
@@ -97,6 +99,7 @@ COLOR_PALETTES = {
     },
     "High Contrast (Black on White)": {
         "background": "#ffffff",
+        "grid_bar": "#999999",
         "grid_major": "#cccccc",
         "grid_minor": "#e8e8e8",
         "ruler_bg": "#f5f5f5",
@@ -130,6 +133,7 @@ COLOR_PALETTES = {
     },
     "Apple Green": {
         "background": "#001100",
+        "grid_bar": "#005500",
         "grid_major": "#003300",
         "grid_minor": "#002200",
         "ruler_bg": "#001a00",
