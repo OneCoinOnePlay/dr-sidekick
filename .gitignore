@@ -19,6 +19,7 @@ test_*.bin
 # User data and local content
 Backup/
 snapshots/
+logs/
 
 # Clearance pending — do not publish
 User-Library/Drums/

@@ -21,7 +21,7 @@ if TYPE_CHECKING:
     from dr_sidekick.app_state import AppState
 
 log = logging.getLogger("dr_sidekick")
-_LOG_PATH = PROJECT_ROOT / "Dr_Sidekick.log"
+_LOG_PATH = PROJECT_ROOT / "logs" / "Dr_Sidekick.log"
 
 class SmartMediaLibraryWindow:
     """SmartMedia Library — the application's true root window."""
