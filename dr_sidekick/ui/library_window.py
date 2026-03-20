@@ -15,6 +15,7 @@ from typing import Callable, Dict, List, Optional, Tuple, TYPE_CHECKING
 
 from dr_sidekick import APP_VERSION
 from dr_sidekick.engine import PROJECT_ROOT, SMPINFO, SP303_PADS, VirtualCard
+from dr_sidekick.engine.packs import discover_packs
 from dr_sidekick.ui.dialogs import show_text_dialog
 
 if TYPE_CHECKING:
@@ -782,7 +783,7 @@ A: Quick Import does not alter the audio level of your WAV files. If samples
         search_entry = ttk.Entry(filter_row, textvariable=search_var)
         search_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 4))
 
-        card_tree_cols = ("name", "author", "ptn")
+        card_tree_cols = ("name", "author", "ptn", "pack")
         style = ttk.Style(self.root)
         style.configure("Library.Treeview", background="#000000", fieldbackground="#000000",
                         foreground="#ffffff", rowheight=22)
@@ -793,9 +794,11 @@ A: Quick Import does not alter the audio level of your WAV files. If samples
         card_tree.heading("name", text="Name")
         card_tree.heading("author", text="Author")
         card_tree.heading("ptn", text="PTN")
+        card_tree.heading("pack", text="Pack")
         card_tree.column("name", width=160)
         card_tree.column("author", width=120)
         card_tree.column("ptn", width=40, anchor=tk.CENTER)
+        card_tree.column("pack", width=40, anchor=tk.CENTER)
         card_tree.tag_configure("active", background="#2a7fff", foreground="#ffffff")
         card_tree.pack(fill=tk.BOTH, expand=True)
 
@@ -855,14 +858,39 @@ A: Quick Import does not alter the audio level of your WAV files. If samples
         # ── State ─────────────────────────────────────────────────────────────
         current_card: list = [None]
         active_smpinfo: list = [None]
+        pack_cards: dict = {}  # name → VirtualCard for pack-sourced entries
+
+        def _load_pack_cards():
+            """Build VirtualCard objects from sample packs in packs/."""
+            pack_cards.clear()
+            for pack in discover_packs(PROJECT_ROOT / "packs"):
+                if not pack.has_samples:
+                    continue
+                card = VirtualCard(
+                    name=pack.title,
+                    device="SP-303",
+                    author=pack.attribution.get("author", ""),
+                    categories=pack.card.get("categories", []) if pack.card else [],
+                    tags=pack.card.get("tags", []) if pack.card else [],
+                    pad_notes=pack.card.get("pad_notes", {}) if pack.card else {},
+                    write_protect=True,
+                    created=pack.card.get("created", "") if pack.card else "",
+                    modified=pack.card.get("modified", "") if pack.card else "",
+                    path=pack.path,
+                )
+                pack_cards[card.name] = card
 
         def get_all_cards():
             query = search_var.get().strip().lower()
             cards = self.state.smartmedia_lib.list_cards()
+            _load_pack_cards()
+            packs = list(pack_cards.values())
             if query:
                 cards = [c for c in cards if query in c.name.lower() or query in c.author.lower()
                          or any(query in cat.lower() for cat in c.categories)]
-            return cards
+                packs = [c for c in packs if query in c.name.lower() or query in c.author.lower()
+                         or any(query in cat.lower() for cat in c.categories)]
+            return cards + packs
 
         def refresh_card_list():
             active_name = current_card[0].name if current_card[0] else None
@@ -870,14 +898,17 @@ A: Quick Import does not alter the audio level of your WAV files. If samples
             seen = set()
             for card in get_all_cards():
                 if card.name in seen:
-                    continue  # skip duplicate names (two dirs with same name in card.json)
+                    continue
                 seen.add(card.name)
                 tag = ("active",) if card.name == active_name else ()
-                ptn_dot = "●" if self.state.smartmedia_lib.card_has_patterns(card.name) else "○"
+                is_pack = card.name in pack_cards
+                ptn_dot = "●" if not is_pack and self.state.smartmedia_lib.card_has_patterns(card.name) else "○"
+                pack_dot = "●" if is_pack else ""
+                vals = (card.name, card.author, ptn_dot, pack_dot)
                 if card_tree.exists(card.name):
-                    card_tree.item(card.name, values=(card.name, card.author, ptn_dot), tags=tag)
+                    card_tree.item(card.name, values=vals, tags=tag)
                 else:
-                    card_tree.insert("", tk.END, iid=card.name, values=(card.name, card.author, ptn_dot), tags=tag)
+                    card_tree.insert("", tk.END, iid=card.name, values=vals, tags=tag)
             for stale in existing - seen:
                 card_tree.delete(stale)
 
@@ -889,7 +920,7 @@ A: Quick Import does not alter the audio level of your WAV files. If samples
                 current_card[0] = None
                 return
             card_tree.item(sel[0], tags=("active",))
-            card = self.state.smartmedia_lib.get_card(sel[0])
+            card = pack_cards.get(sel[0]) or self.state.smartmedia_lib.get_card(sel[0])
             if card is None:
                 return
             current_card[0] = card
