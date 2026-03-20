@@ -1906,22 +1906,36 @@ class VirtualCard:
     path: Path = field(default_factory=Path)
 
     def to_dict(self) -> dict:
-        return {
-            "name": self.name, "device": self.device, "author": self.author,
-            "categories": self.categories, "tags": self.tags,
+        card_block = {
+            "device": self.device,
+            "categories": self.categories,
+            "tags": self.tags,
             "pad_notes": self.pad_notes,
             "write_protect": self.write_protect,
-            "created": self.created, "modified": self.modified,
+            "created": self.created,
+            "modified": self.modified,
+        }
+        return {
+            "format": "sp303-pack",
+            "title": self.name,
+            "attribution": {"author": self.author},
+            "card": card_block,
         }
 
     @classmethod
     def from_dict(cls, d: dict, path: Path) -> "VirtualCard":
+        card_block = d.get("card", {})
+        attribution = d.get("attribution", {})
         return cls(
-            name=d.get("name", path.name), device=d.get("device", "SP-303"),
-            author=d.get("author", ""), categories=d.get("categories", []),
-            tags=d.get("tags", []), pad_notes=d.get("pad_notes", {}),
-            write_protect=d.get("write_protect", False),
-            created=d.get("created", ""), modified=d.get("modified", ""),
+            name=d.get("title", path.name),
+            device=card_block.get("device", "SP-303"),
+            author=attribution.get("author", ""),
+            categories=card_block.get("categories", []),
+            tags=card_block.get("tags", []),
+            pad_notes=card_block.get("pad_notes", {}),
+            write_protect=card_block.get("write_protect", False),
+            created=card_block.get("created", ""),
+            modified=card_block.get("modified", ""),
             path=path,
         )
 
@@ -1945,7 +1959,7 @@ class SmartMediaLibrary:
         for card_dir in sorted(self.cards_dir.iterdir()):
             if not card_dir.is_dir():
                 continue
-            json_path = card_dir / "card.json"
+            json_path = card_dir / "pack.json"
             if json_path.exists():
                 try:
                     with open(json_path, "r", encoding="utf-8") as f:
@@ -1957,7 +1971,7 @@ class SmartMediaLibrary:
 
     def get_card(self, name: str) -> Optional["VirtualCard"]:
         card_dir = self.cards_dir / name
-        json_path = card_dir / "card.json"
+        json_path = card_dir / "pack.json"
         if not json_path.exists():
             return None
         try:
@@ -1974,12 +1988,12 @@ class SmartMediaLibrary:
         if not card.created:
             card.created = datetime.now().isoformat(timespec="seconds")
         card.modified = datetime.now().isoformat(timespec="seconds")
-        with open(card_dir / "card.json", "w", encoding="utf-8") as f:
+        with open(card_dir / "pack.json", "w", encoding="utf-8") as f:
             json.dump(card.to_dict(), f, indent=2)
 
     def save_card(self, card: "VirtualCard"):
         card.modified = datetime.now().isoformat(timespec="seconds")
-        with open(card.path / "card.json", "w", encoding="utf-8") as f:
+        with open(card.path / "pack.json", "w", encoding="utf-8") as f:
             json.dump(card.to_dict(), f, indent=2)
 
     def rename_card(self, card: "VirtualCard", new_name: str):
