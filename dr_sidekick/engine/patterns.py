@@ -487,8 +487,13 @@ class PatternModel:
                 f"Removed {clipped_events} event(s) beyond the current {length_bars}-bar pattern length."
             )
         if truncated_events > 0:
+            requested_events = len(candidate_events)
+            fitted_count = len(fitted_events)
             warning_parts.append(
-                f"This pattern is too dense for the SP-303. Try reducing the pattern length below {length_bars} bar(s) to fit more notes."
+                "This pattern is too dense for the SP-303. "
+                f"The SP-303 has a nominal {MAX_PATTERN_EVENT_CAPACITY}-event cap, "
+                f"{requested_events} requested, {fitted_count} fit, {truncated_events} dropped. "
+                f"Try reducing the pattern length below {length_bars} bar(s) to fit more notes."
             )
         if warning_parts:
             self.last_stamp_warning = " ".join(warning_parts)
