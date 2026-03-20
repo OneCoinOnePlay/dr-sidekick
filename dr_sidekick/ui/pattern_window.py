@@ -86,6 +86,7 @@ class PatternManagerWindow:
         self.root.bind("<Control-Shift-C>", lambda e: self.on_copy_slot())
         self.root.bind("<Control-Shift-V>", lambda e: self.on_paste_slot())
         self.root.bind("<Control-q>", lambda e: self.on_exit())
+        self.root.bind("<Escape>", lambda e: self.on_clear_selection())
         self.root.bind("<d>", self.on_delete_key_root)
         self.root.bind("<D>", self.on_delete_key_root)
         self.root.bind("<Delete>", self.on_delete_key_root)
@@ -152,6 +153,7 @@ class PatternManagerWindow:
         edit_menu.add_command(label="Copy Pattern", command=self.on_copy_slot, accelerator="Ctrl+Shift+C")
         edit_menu.add_command(label="Paste Pattern", command=self.on_paste_slot, accelerator="Ctrl+Shift+V")
         edit_menu.add_separator()
+        edit_menu.add_command(label="Reassign Pad...", command=self.on_reassign_pad)
         edit_menu.add_command(label="Quantize Selected...", command=self.on_quantize_selected)
         edit_menu.add_command(label="Apply Groove...", command=self.on_apply_groove)
         edit_menu.add_command(label="Stamp Pattern...", command=self.on_stamp_pattern)
@@ -241,6 +243,7 @@ class PatternManagerWindow:
                 ("Ctrl+Z",        "Undo"),
                 ("Ctrl+Shift+Z",  "Redo"),
                 ("Ctrl+A",        "Select All"),
+                ("Esc",           "Clear row/event selection"),
                 ("D / Del / Bksp","Delete Selected"),
                 ("Right-Click",   "Delete Event"),
                 ("[",             "Decrease Velocity"),
@@ -261,6 +264,12 @@ class PatternManagerWindow:
                 ("Draw",          "Click to add notes, drag to move, right-click to delete"),
                 ("Select",        "Click to select, drag to create selection rectangle"),
                 ("Erase",         "Click to delete notes"),
+            ]),
+            ("PAD ROWS", [
+                ("Click Row Header", "Select all events on a pad row such as C1"),
+                ("Click Row Again",  "Deselect the highlighted row"),
+                ("Double-Click Row", "Open Reassign Pad for that source row"),
+                ("Edit > Reassign Pad...", "Move the selected row or single-pad selection to another pad"),
             ]),
         ]
 
@@ -310,8 +319,8 @@ class PatternManagerWindow:
         )
 
         content = f"""\
-GROOVES & PATTERNS
-==================
+GROOVES, PATTERNS & PAD ROWS
+============================
 
 Dr. Sidekick includes a library of timing templates captured from
 classic drum machines. These let you apply the feel of vintage
@@ -319,6 +328,41 @@ hardware to your SP-303 patterns.
 
   Groove library:  {grid_total} grooves, {compound_total} patterns
   Attribution:     {attr_line}
+
+
+PAD ROW SELECTION  (Lane Header Click)
+--------------------------------------
+
+Click a row header on the left, such as C1 or D4, to select all
+events on that pad lane.
+
+  How to use:
+    1. Click a lane label such as C1
+    2. The full row highlights and its events become selected
+    3. Click the same row again, click the ruler spacer, or press Esc
+       to clear the selection
+
+  Double-clicking a row header opens Reassign Pad for that row.
+
+
+REASSIGN PAD  (Edit > Reassign Pad...)
+--------------------------------------
+
+Moves notes from one pad to another without changing timing or
+velocity.
+
+  How to use:
+    1. Click a row header such as C1
+    2. Choose Edit > Reassign Pad...
+    3. Pick a destination pad such as C2
+    4. Click Apply
+
+  Notes:
+    - If you already selected events on exactly one pad, Reassign Pad
+      can use that selection as the source.
+    - The operation is undoable with Ctrl+Z.
+    - Destination pads may already contain notes; the moved notes are
+      merged onto that pad.
 
 
 APPLY GROOVE  (Edit > Apply Groove)
@@ -473,6 +517,8 @@ AVAILABLE MACHINES
             highlightthickness=0
         )
         self.lane_canvas.pack(fill=tk.BOTH, expand=True)
+        self.lane_canvas.bind("<Button-1>", self.on_lane_click)
+        self.lane_canvas.bind("<Double-Button-1>", self.on_lane_double_click)
 
         # Piano roll canvas with scrollbars
         canvas_frame = ttk.Frame(main_frame)
@@ -495,6 +541,7 @@ AVAILABLE MACHINES
             yscrollcommand=v_scrollbar.set
         )
         self.canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self.canvas.on_view_changed = self.update_lane_labels
 
         # Configure scrollbars
         h_scrollbar.config(command=self.canvas.xview)
@@ -628,19 +675,70 @@ AVAILABLE MACHINES
 
         for i, pad in enumerate(PAD_ORDER):
             y = i * zoom_y - offset_y + ruler_height
+            row_fill = colors["lane_label_bg"]
+            if self.canvas.selected_pad_row == pad:
+                row_fill = self.canvas._tk_fill_style(colors["selection_fill"])[0]
+            self.lane_canvas.create_rectangle(
+                0,
+                y,
+                60,
+                y + zoom_y,
+                fill=row_fill,
+                outline="",
+                tags=("lane_row", f"lane_pad_{pad:02x}"),
+            )
             # Draw label centered in lane
             self.lane_canvas.create_text(
                 30, y + zoom_y // 2,
                 text=PAD_NAMES[pad],
                 fill=colors["lane_label_text"],
                 font=("Courier", 10, "bold"),
-                tags="lane_label"
+                tags=("lane_label", f"lane_pad_{pad:02x}"),
             )
 
     def on_canvas_configure(self):
         """Handle canvas resize"""
         self.canvas.redraw()
         self.update_lane_labels()
+
+    def _pad_from_lane_y(self, y: int) -> Optional[int]:
+        """Resolve a lane label click to the visible pad row."""
+        ruler_height = 25
+        if y < ruler_height:
+            return None
+        lane_index = int((y + self.canvas.offset_y - ruler_height) / self.canvas.zoom_y)
+        if 0 <= lane_index < len(PAD_ORDER):
+            return PAD_ORDER[lane_index]
+        return None
+
+    def _select_pad_row(self, pad: Optional[int]):
+        """Select all events on a pad row and refresh both canvases."""
+        self.canvas.select_pad_row(pad)
+        self.update_lane_labels()
+        if pad is None:
+            self.update_status_with_pattern_info()
+            return
+        count = len(self.canvas.selected_events)
+        self.update_status(f"Selected row {PAD_NAMES[pad]} ({count} event(s))")
+
+    def on_lane_click(self, event):
+        """Select a full pad row from the lane header."""
+        pad = self._pad_from_lane_y(event.y)
+        if pad is None:
+            self._select_pad_row(None)
+            return
+        if self.canvas.selected_pad_row == pad:
+            self._select_pad_row(None)
+            return
+        self._select_pad_row(pad)
+
+    def on_lane_double_click(self, event):
+        """Open pad reassignment from the clicked row."""
+        pad = self._pad_from_lane_y(event.y)
+        if pad is None:
+            return
+        self._select_pad_row(pad)
+        self.on_reassign_pad()
 
     def slot_index_to_label(self, index: int) -> str:
         """Convert slot index (0-15) to label (C1-C8, D1-D8)"""
@@ -671,7 +769,9 @@ AVAILABLE MACHINES
         self.canvas.set_pattern_length(DEFAULT_PATTERN_LENGTH_BARS)
 
         self.canvas.selected_events.clear()
+        self.canvas.selected_pad_row = None
         self.canvas.redraw()
+        self.update_lane_labels()
         self.update_status_with_pattern_info()
         self.refresh_slot_labels()
 
@@ -721,7 +821,9 @@ AVAILABLE MACHINES
             self.grid_var.set(self.model.get_ptninfo_quantize_display(self.model.current_slot))
 
             self.canvas.selected_events.clear()
+            self.canvas.selected_pad_row = None
             self.canvas.redraw()
+            self.update_lane_labels()
 
             self.update_status(f"Loaded: {ptninfo_path.parent}")
             self.refresh_slot_labels()
@@ -778,14 +880,18 @@ AVAILABLE MACHINES
         """Undo last operation"""
         if self.model.undo():
             self.canvas.selected_events.clear()
+            self.canvas.selected_pad_row = None
             self.canvas.redraw()
+            self.update_lane_labels()
             self.update_status("Undo")
 
     def on_redo(self):
         """Redo last undone operation"""
         if self.model.redo():
             self.canvas.selected_events.clear()
+            self.canvas.selected_pad_row = None
             self.canvas.redraw()
+            self.update_lane_labels()
             self.update_status("Redo")
 
     def on_delete(self):
@@ -794,7 +900,9 @@ AVAILABLE MACHINES
             count = len(self.canvas.selected_events)
             self.model.remove_events(list(self.canvas.selected_events))
             self.canvas.selected_events.clear()
+            self.canvas.selected_pad_row = None
             self.canvas.redraw()
+            self.update_lane_labels()
             self.update_status(f"Deleted {count} events")
             # Update to show pattern info after a moment
             self.root.after(1500, self.update_status_with_pattern_info)
@@ -802,6 +910,17 @@ AVAILABLE MACHINES
     def on_delete_key_root(self, event=None):
         """Root-level delete shortcut handler."""
         self.on_delete()
+        return "break"
+
+    def on_clear_selection(self):
+        """Clear any row or event selection."""
+        if not self.canvas.selected_events and self.canvas.selected_pad_row is None:
+            return "break"
+        self.canvas.selected_events.clear()
+        self.canvas.selected_pad_row = None
+        self.canvas.redraw()
+        self.update_lane_labels()
+        self.update_status_with_pattern_info()
         return "break"
 
     def on_velocity_decrease_root(self, event=None):
@@ -817,7 +936,9 @@ AVAILABLE MACHINES
     def on_select_all(self):
         """Select all events"""
         self.canvas.selected_events = list(self.model.events)
+        self.canvas.selected_pad_row = None
         self.canvas.redraw()
+        self.update_lane_labels()
         self.update_status(f"Selected {len(self.model.events)} events")
 
     def on_clear_slot(self):
@@ -826,7 +947,9 @@ AVAILABLE MACHINES
         if messagebox.askyesno("Clear Pattern", f"Clear all events in pattern {pattern_label}?"):
             self.model.clear_slot()
             self.canvas.selected_events.clear()
+            self.canvas.selected_pad_row = None
             self.canvas.redraw()
+            self.update_lane_labels()
             self.update_status_with_pattern_info()
             self.refresh_slot_labels()
 
@@ -856,7 +979,9 @@ AVAILABLE MACHINES
         self.grid_var.set(self.model.get_ptninfo_quantize_display(slot_index))
 
         self.canvas.selected_events.clear()
+        self.canvas.selected_pad_row = None
         self.canvas.redraw()
+        self.update_lane_labels()
         self.update_status_with_pattern_info()
 
     def on_slot_previous(self):
@@ -1064,7 +1189,9 @@ AVAILABLE MACHINES
                 self.canvas.set_pattern_length(calculated_length)
                 self.grid_var.set(self.model.get_ptninfo_quantize_display(self.model.current_slot))
                 self.canvas.selected_events.clear()
+                self.canvas.selected_pad_row = None
                 self.canvas.redraw()
+                self.update_lane_labels()
                 self._focus_first_event()
                 self.refresh_slot_labels()
                 self.update_status(
@@ -1120,7 +1247,9 @@ AVAILABLE MACHINES
             self.canvas.set_pattern_length(calculated_length)
 
             self.canvas.selected_events.clear()
+            self.canvas.selected_pad_row = None
             self.canvas.redraw()
+            self.update_lane_labels()
             self._focus_first_event()
             action = "Replaced" if replace else "Added"
             status_msg = f"MIDI Import: {action} {count} events from Ch {selected_channel}"
@@ -1328,7 +1457,9 @@ AVAILABLE MACHINES
         self.canvas.set_pattern_length(calculated_length)
 
         self.canvas.selected_events.clear()
+        self.canvas.selected_pad_row = None
         self.canvas.redraw()
+        self.update_lane_labels()
         self._focus_first_event()
         self.update_status_with_pattern_info()
 
@@ -1376,7 +1507,9 @@ AVAILABLE MACHINES
             self.canvas.set_pattern_length(calculated_length)
 
             self.canvas.selected_events.clear()
+            self.canvas.selected_pad_row = None
             self.canvas.redraw()
+            self.update_lane_labels()
             self.update_status("Generated test data (Bank C + D: asc/desc A1-D8, 1-8 bars, quantize cycle)")
             self.refresh_slot_labels()
 
@@ -1701,7 +1834,88 @@ AVAILABLE MACHINES
         self.model.dirty = True
 
         self.canvas.redraw()
+        self.update_lane_labels()
         self.update_status(f"Set velocity to {new_vel} for {len(self.canvas.selected_events)} events")
+
+    def on_reassign_pad(self):
+        """Reassign events from one pad row to another."""
+        source_pad = self.canvas.selected_pad_row
+        candidate_events = None
+        if source_pad is None:
+            if not self.canvas.selected_events:
+                messagebox.showwarning(
+                    "Reassign Pad",
+                    "Select a row header such as C1, or select events on a single pad first.",
+                )
+                return
+            source_pads = {event.pad for event in self.canvas.selected_events}
+            if len(source_pads) != 1:
+                messagebox.showwarning(
+                    "Reassign Pad",
+                    "Selected events span multiple pads. Click a single row header to choose the source pad.",
+                )
+                return
+            source_pad = next(iter(source_pads))
+            candidate_events = list(self.canvas.selected_events)
+
+        source_label = PAD_NAMES.get(source_pad, f"0x{source_pad:02X}")
+        target_values = [PAD_NAMES[pad] for pad in PAD_ORDER if pad != source_pad]
+
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Reassign Pad")
+        dialog.geometry("320x180")
+        dialog.transient(self.root)
+        dialog.grab_set()
+        dialog.configure(bg="#000000")
+
+        ttk.Label(dialog, text=f"Move events from {source_label} to:").pack(pady=(14, 8))
+        target_var = tk.StringVar(value=target_values[0])
+        target_combo = ttk.Combobox(
+            dialog,
+            textvariable=target_var,
+            values=target_values,
+            state="readonly",
+            width=10,
+        )
+        target_combo.pack(pady=(0, 12))
+
+        scope_text = (
+            f"Scope: selected events on {source_label}"
+            if candidate_events is not None
+            else f"Scope: all events on row {source_label}"
+        )
+        ttk.Label(dialog, text=scope_text).pack(pady=(0, 12))
+
+        def apply_reassign():
+            target_label = target_var.get()
+            target_pad = next((pad for pad, name in PAD_NAMES.items() if name == target_label), None)
+            if target_pad is None:
+                messagebox.showwarning("Reassign Pad", "Choose a target pad.", parent=dialog)
+                return
+            moved = self.model.reassign_pad(source_pad, target_pad, events=candidate_events)
+            if moved == 0:
+                messagebox.showwarning(
+                    "Reassign Pad",
+                    f"No events found on {source_label} to move.",
+                    parent=dialog,
+                )
+                return
+            self.canvas.selected_pad_row = target_pad
+            self.canvas.selected_events = [event for event in self.model.events if event.pad == target_pad]
+            self.canvas.redraw()
+            self.update_lane_labels()
+            self.update_status(f"Reassigned {moved} event(s) from {source_label} to {target_label}")
+            dialog.destroy()
+
+        button_frame = ttk.Frame(dialog)
+        button_frame.pack(pady=(0, 10))
+        ttk.Button(button_frame, text="Apply", command=apply_reassign).pack(side=tk.LEFT, padx=5)
+        ttk.Button(button_frame, text="Cancel", command=dialog.destroy).pack(side=tk.LEFT, padx=5)
+
+        dialog.update_idletasks()
+        x = self.root.winfo_x() + (self.root.winfo_width() - dialog.winfo_width()) // 2
+        y = self.root.winfo_y() + (self.root.winfo_height() - dialog.winfo_height()) // 2
+        dialog.geometry(f"+{x}+{y}")
 
     def on_copy_slot(self):
         """Copy current slot"""
@@ -1718,7 +1932,9 @@ AVAILABLE MACHINES
 
         self.model.paste_slot()
         self.canvas.selected_events.clear()
+        self.canvas.selected_pad_row = None
         self.canvas.redraw()
+        self.update_lane_labels()
         pattern_label = self.slot_index_to_label(self.model.current_slot)
         self.update_status(f"Pasted {len(self.model.events)} events to pattern {pattern_label}")
         self.refresh_slot_labels()
@@ -1820,7 +2036,9 @@ Velocity:
             self.canvas.set_pattern_length(pattern_length)
             self.grid_var.set(self.model.get_ptninfo_quantize_display(self.model.current_slot))
             self.canvas.selected_events.clear()
+            self.canvas.selected_pad_row = None
             self.canvas.redraw()
+            self.update_lane_labels()
             self.refresh_slot_labels()
             self.update_status_with_pattern_info()
             self.update_status(f"Exchanged patterns {from_label} and {to_label}")
@@ -1961,7 +2179,9 @@ Velocity:
             self.canvas.set_pattern_length(calculated_length)
 
             self.canvas.selected_events.clear()
+            self.canvas.selected_pad_row = None
             self.canvas.redraw()
+            self.update_lane_labels()
             self.update_status(f"Loaded: {ptninfo_path.parent}")
 
             # Move to front of recent files

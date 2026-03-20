@@ -43,6 +43,8 @@ class PianoRollCanvas(tk.Canvas):
         self.drag_offset: Optional[Tuple[int, int]] = None
         self.selection_rect_start: Optional[Tuple[int, int]] = None
         self.edit_mode = "Draw"  # Draw, Select, Erase
+        self.on_view_changed = None
+        self.selected_pad_row: Optional[int] = None
 
         # Bind mouse events
         self.bind("<Button-1>", self.on_mouse_down)
@@ -109,6 +111,16 @@ class PianoRollCanvas(tk.Canvas):
         """Set edit mode"""
         self.edit_mode = mode
         self.selected_events.clear()
+        self.selected_pad_row = None
+        self.redraw()
+
+    def select_pad_row(self, pad: Optional[int]):
+        """Select an entire pad lane."""
+        self.selected_pad_row = pad
+        if pad is None:
+            self.selected_events.clear()
+        else:
+            self.selected_events = [event for event in self.model.events if event.pad == pad]
         self.redraw()
 
     def redraw(self):
@@ -131,6 +143,9 @@ class PianoRollCanvas(tk.Canvas):
 
         # Draw grid
         self._draw_grid(width, height)
+
+        # Draw lane highlight before event blocks.
+        self._draw_selected_pad_row(width, height)
 
         # Draw lane separators
         self._draw_lane_separators(width, height)
@@ -186,6 +201,8 @@ class PianoRollCanvas(tk.Canvas):
         result = super().xview(*args)
         self._refresh_view_offsets()
         self.redraw()
+        if callable(self.on_view_changed):
+            self.on_view_changed()
         return result
 
     def yview(self, *args):
@@ -193,6 +210,8 @@ class PianoRollCanvas(tk.Canvas):
         result = super().yview(*args)
         self._refresh_view_offsets()
         self.redraw()
+        if callable(self.on_view_changed):
+            self.on_view_changed()
         return result
 
     def _draw_ruler(self, width: int):
@@ -271,6 +290,28 @@ class PianoRollCanvas(tk.Canvas):
             y = i * self.zoom_y + ruler_height
             if top_y <= y <= bottom_y:
                 self.create_line(left_x, y, right_x, y, fill=self.colors["lane_separator"], tags="lane_sep")
+
+    def _draw_selected_pad_row(self, width: int, height: int):
+        """Highlight the currently selected pad lane."""
+        if self.selected_pad_row not in PAD_ORDER:
+            return
+        ruler_height = 25
+        lane_index = PAD_ORDER.index(self.selected_pad_row)
+        y0 = (lane_index * self.zoom_y) - self.offset_y + ruler_height
+        y1 = y0 + self.zoom_y
+        left_x = self.canvasx(0)
+        right_x = self.canvasx(width)
+        fill_color, fill_stipple = self._tk_fill_style(self.colors["selection_fill"])
+        self.create_rectangle(
+            left_x,
+            y0,
+            right_x,
+            y1,
+            outline="",
+            fill=fill_color,
+            stipple=fill_stipple,
+            tags="pad_row_highlight",
+        )
 
     def _draw_pattern_end_marker(self, height: int):
         """Draw vertical line showing pattern end"""
@@ -414,6 +455,7 @@ class PianoRollCanvas(tk.Canvas):
     def on_mouse_down(self, event):
         """Handle mouse down"""
         self.focus_set()
+        self.selected_pad_row = None
         # Find event at position
         clicked_event = self.find_event_at(event.x, event.y)
 
@@ -460,6 +502,7 @@ class PianoRollCanvas(tk.Canvas):
             # Move event
             new_tick = self.x_to_tick(event.x)
             new_pad = self.y_to_pad(event.y)
+            self.selected_pad_row = None
             self.model.move_event(self.dragging_event, new_tick, new_pad)
             self.redraw()
 
@@ -491,6 +534,7 @@ class PianoRollCanvas(tk.Canvas):
                     self.selected_events.append(evt)
 
             self.selection_rect_start = None
+            self.selected_pad_row = None
             self.redraw()
 
         self.dragging_event = None
