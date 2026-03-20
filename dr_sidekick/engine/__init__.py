@@ -2,4 +2,5 @@
 
 from .core import *  # noqa: F401,F403
 from .core import GrooveLibrary, GrooveTemplate  # noqa: F401
+from .packs import Pack, discover_packs, promote_card_to_pack  # noqa: F401
 from .patterns import ModelState, PatternModel
