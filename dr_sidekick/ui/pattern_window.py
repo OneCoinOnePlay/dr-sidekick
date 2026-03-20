@@ -616,11 +616,16 @@ AVAILABLE MACHINES
             # Pads used
             pads_used = len(set(e.pad for e in self.model.events))
 
-            # Calculate actual length from events
+            # Event span can be shorter than the loop length when a groove
+            # intentionally leaves space before the bar wraps.
             last_tick = max(e.tick for e in self.model.events)
-            actual_length = (last_tick + 1) / (4 * INTERNAL_PPQN)
+            event_span_bars = (last_tick + 1) / (4 * INTERNAL_PPQN)
 
-            status_text = f"Pattern: {slot_label} - {event_count} events, {actual_length:.1f} bars, {pads_used} pads{mapping_text}"
+            status_text = (
+                f"Pattern: {slot_label} - {event_count} events, "
+                f"{pattern_length_bars} bar loop, {event_span_bars:.1f} bar event span, "
+                f"{pads_used} pads{mapping_text}"
+            )
 
         self.status_bar.config(text=status_text)
         self.refresh_slot_labels()
@@ -838,6 +843,9 @@ AVAILABLE MACHINES
             self.canvas.redraw()
             self.update_status(f"Saved: {self.model.ptninfo_path.parent}")
             self.refresh_slot_labels()
+            if self.model.last_save_warning:
+                messagebox.showwarning("Pattern Save Warning", self.model.last_save_warning)
+                self.model.last_save_warning = None
         except Exception as e:
             messagebox.showerror("Error", f"Failed to save pattern: {e}")
 
@@ -860,6 +868,9 @@ AVAILABLE MACHINES
             self.canvas.redraw()
             self.update_status(f"Saved: {directory}")
             self.refresh_slot_labels()
+            if self.model.last_save_warning:
+                messagebox.showwarning("Pattern Save Warning", self.model.last_save_warning)
+                self.model.last_save_warning = None
         except Exception as e:
             messagebox.showerror("Error", f"Failed to save pattern: {e}")
 
@@ -1781,6 +1792,9 @@ AVAILABLE MACHINES
             self.update_status(
                 f"Stamped '{groove.name}' on pad {pad_name} ({added} events added)"
             )
+            if self.model.last_stamp_warning:
+                messagebox.showwarning("Stamp Pattern", self.model.last_stamp_warning)
+                self.model.last_stamp_warning = None
             dialog.destroy()
 
         # Buttons
@@ -1945,8 +1959,10 @@ AVAILABLE MACHINES
         event_count = len(self.model.events)
         first_tick = min(e.tick for e in self.model.events)
         last_tick = max(e.tick for e in self.model.events)
-        pattern_length_ticks = (last_tick - first_tick) + 1
-        pattern_length_bars = pattern_length_ticks / (4 * INTERNAL_PPQN)
+        event_span_ticks = (last_tick - first_tick) + 1
+        event_span_bars = event_span_ticks / (4 * INTERNAL_PPQN)
+        loop_length_bars = self.model.get_pattern_length_bars()
+        loop_length_ticks = loop_length_bars * 4 * INTERNAL_PPQN
 
         # Pads used
         pads_used = set(e.pad for e in self.model.events)
@@ -1962,8 +1978,8 @@ AVAILABLE MACHINES
         info_text = f"""Pattern {slot_label} Info:
 
 Events: {event_count}
-Pattern Length: {pattern_length_bars:.2f} bars ({pattern_length_ticks} ticks)
-  Note: Each pattern has its own length
+Loop Length: {loop_length_bars:.2f} bars ({loop_length_ticks} ticks)
+Event Span: {event_span_bars:.2f} bars ({event_span_ticks} ticks)
 First Event: Tick {first_tick}
 Last Event: Tick {last_tick}
 
