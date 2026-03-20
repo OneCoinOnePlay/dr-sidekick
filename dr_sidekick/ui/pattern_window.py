@@ -268,7 +268,6 @@ class PatternSequencerWindow:
                 ("Click Row Header", "Select all events on a pad row such as C1"),
                 ("Click Row Again",  "Deselect the highlighted row"),
                 ("Double-Click Row", "Open Reassign Pad for that source row"),
-                ("Edit > Transform > Reassign Pad...", "Move the selected row or single-pad selection to another pad"),
             ]),
         ]
 
@@ -292,8 +291,6 @@ class PatternSequencerWindow:
 
     def on_show_groove_help(self):
         """Show the Grooves & Patterns help page."""
-        # Build machine/groove summary from the loaded library
-        lines = []
         grid_total = 0
         compound_total = 0
         for m in self.groove_library.machines:
@@ -302,12 +299,6 @@ class PatternSequencerWindow:
             c = sum(1 for x in grooves if x.groove_type == "compound")
             grid_total += g
             compound_total += c
-            parts = []
-            if g:
-                parts.append(f"{g} grooves")
-            if c:
-                parts.append(f"{c} patterns")
-            lines.append(f"  {m:12s}  {', '.join(parts)}")
 
         attr = self.groove_library.get_attribution(
             self.groove_library.machines[0]
@@ -414,12 +405,6 @@ existing ones.
   - If Stamp reports "too dense," shorten the pattern or reduce hits.
 
   This is undoable (Ctrl+Z).
-
-
-AVAILABLE MACHINES
-------------------
-
-{chr(10).join(lines)}
 """
         show_text_dialog(self.root, "Grooves & Patterns", content, "580x720")
 
@@ -448,7 +433,7 @@ AVAILABLE MACHINES
 
         tk.Label(
             container,
-            text="Standalone graphical pattern editor and SmartMedia librarian for the BOSS Dr. Sample SP-303",
+            text="Pattern Sequencer and SmartMedia Librarian for the BOSS Dr. Sample SP-303",
             wraplength=580,
             justify=tk.LEFT,
             bg="#000000",
