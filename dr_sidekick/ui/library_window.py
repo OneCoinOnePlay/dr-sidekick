@@ -132,7 +132,7 @@ class SmartMediaLibraryWindow:
 
     def _create_menu(self, *, open_card, backup_card, new_card, delete_card,
                      save_current_card, restore_to_card, open_in_manager,
-                     create_virtual_card_from_physical):
+                     create_virtual_card_from_physical, create_pack_from_card):
         """Build and attach the library window menu bar."""
         menubar = tk.Menu(self.root)
         self.root.config(menu=menubar)
@@ -165,6 +165,8 @@ class SmartMediaLibraryWindow:
         card_menu.add_separator()
         card_menu.add_command(label="Create Virtual Card from Physical",
                               command=create_virtual_card_from_physical)
+        card_menu.add_command(label="Create Pack from Virtual Card",
+                              command=create_pack_from_card)
 
         # Help
         help_menu = tk.Menu(menubar, tearoff=0)
@@ -987,6 +989,71 @@ A: Quick Import does not alter the audio level of your WAV files. If samples
                 return
             self.open_sample_manager(smpinfo_path=smpinfo)
 
+        def create_pack_from_card():
+            card = current_card[0]
+            if card is None:
+                messagebox.showinfo("Create Pack", "Select a card first.", parent=self.root)
+                return
+
+            dlg = tk.Toplevel(self.root)
+            dlg.title(f"Create Pack from '{card.name}'")
+            dlg.resizable(False, False)
+            dlg.transient(self.root)
+            dlg.grab_set()
+
+            frame = ttk.Frame(dlg, padding=12)
+            frame.pack(fill=tk.BOTH, expand=True)
+
+            ttk.Label(frame, text="Description:").grid(row=0, column=0, sticky=tk.W, pady=(0, 4))
+            desc_var = tk.StringVar()
+            ttk.Entry(frame, textvariable=desc_var, width=40).grid(row=0, column=1, sticky=tk.EW, pady=(0, 4))
+
+            ttk.Label(frame, text="URL:").grid(row=1, column=0, sticky=tk.W, pady=(0, 4))
+            url_var = tk.StringVar()
+            ttk.Entry(frame, textvariable=url_var, width=40).grid(row=1, column=1, sticky=tk.EW, pady=(0, 4))
+
+            ttk.Label(frame, text="License:").grid(row=2, column=0, sticky=tk.W, pady=(0, 4))
+            license_var = tk.StringVar()
+            ttk.Entry(frame, textvariable=license_var, width=40).grid(row=2, column=1, sticky=tk.EW, pady=(0, 4))
+
+            frame.columnconfigure(1, weight=1)
+            result = [None]
+
+            def on_ok():
+                result[0] = {
+                    "description": desc_var.get().strip(),
+                    "url": url_var.get().strip(),
+                    "license": license_var.get().strip(),
+                }
+                dlg.destroy()
+
+            btn_row = ttk.Frame(frame)
+            btn_row.grid(row=3, column=0, columnspan=2, pady=(8, 0))
+            ttk.Button(btn_row, text="Create", command=on_ok).pack(side=tk.LEFT, padx=(0, 6))
+            ttk.Button(btn_row, text="Cancel", command=dlg.destroy).pack(side=tk.LEFT)
+
+            dlg.wait_window()
+            if result[0] is None:
+                return
+
+            packs_dir = PROJECT_ROOT / "packs"
+            try:
+                from dr_sidekick.engine.packs import promote_card_to_pack
+                pack_path = promote_card_to_pack(
+                    card.path, packs_dir,
+                    description=result[0]["description"],
+                    url=result[0]["url"],
+                    license_text=result[0]["license"],
+                )
+                messagebox.showinfo(
+                    "Create Pack",
+                    f"Pack created at:\n{pack_path.name}",
+                    parent=self.root,
+                )
+            except Exception as exc:
+                log.error("Failed to create pack from card '%s': %s", card.name, exc)
+                messagebox.showerror("Create Pack", f"Failed to create pack:\n{exc}", parent=self.root)
+
         def create_virtual_card_from_physical():
             if active_smpinfo[0] is None:
                 messagebox.showinfo(
@@ -1041,4 +1108,5 @@ A: Quick Import does not alter the audio level of your WAV files. If samples
             restore_to_card=restore_to_card,
             open_in_manager=open_in_manager,
             create_virtual_card_from_physical=create_virtual_card_from_physical,
+            create_pack_from_card=create_pack_from_card,
         )

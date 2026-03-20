@@ -102,28 +102,33 @@ class GrooveTemplate:
 
 
 class GrooveLibrary:
-    """Loads and indexes the JSON groove files from the grooves/ folder."""
+    """Loads and indexes groove files from content packs."""
 
-    def __init__(self, grooves_dir: Optional[Path] = None):
-        if grooves_dir is None:
-            grooves_dir = PROJECT_ROOT / "grooves"
-        self.grooves_dir = grooves_dir
+    def __init__(self, packs_dir: Optional[Path] = None):
+        if packs_dir is None:
+            packs_dir = PROJECT_ROOT / "packs"
         self.machines: List[str] = []
         self._by_machine: Dict[str, List[GrooveTemplate]] = {}
         self._attribution: Dict[str, dict] = {}
-        self._load()
+        self._load_packs(packs_dir)
 
-    def _load(self):
-        if not self.grooves_dir.is_dir():
-            log.warning("Groove library folder not found: %s", self.grooves_dir)
+    def _load_packs(self, packs_dir: Path):
+        from .packs import discover_packs
+
+        for pack in discover_packs(packs_dir):
+            if pack.has_grooves:
+                self._load_grooves(pack.grooves_path, pack.attribution)
+
+    def _load_grooves(self, grooves_dir: Path, attribution: dict):
+        if not grooves_dir.is_dir():
+            log.warning("Groove library folder not found: %s", grooves_dir)
             return
-        for json_path in sorted(self.grooves_dir.glob("*.json")):
+        author = attribution.get("author", "")
+        for json_path in sorted(grooves_dir.glob("*.json")):
             try:
                 with open(json_path, "r") as f:
                     data = json.load(f)
                 machine = data["machine"]
-                attribution = data.get("attribution", {})
-                author = attribution.get("author", "")
                 self._attribution[machine] = attribution
                 templates = []
                 for g in data.get("grooves", []):

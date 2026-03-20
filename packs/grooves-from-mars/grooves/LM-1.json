@@ -1,10 +1,4 @@
 {
-  "attribution": {
-    "collection": "Grooves From Mars",
-    "author": "Samples From Mars",
-    "url": "https://samplesfrommars.com",
-    "license": "Used with permission from Samples From Mars"
-  },
   "machine": "LM-1",
   "groove_count": 8,
   "grooves": [
