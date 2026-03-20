@@ -136,7 +136,9 @@ class PatternModel:
             storage_slot = mapping_index - 1
         self.current_storage_slot = storage_slot
 
-        if self.ptndata is not None:
+        if not self.slot_has_pattern(slot_index):
+            self.events = []
+        elif self.ptndata is not None:
             self.events = self.ptndata.decode_events(storage_slot)
             self.events.sort(key=lambda event: event.tick)
         else:
@@ -161,6 +163,9 @@ class PatternModel:
 
     def get_pattern_length_bars(self) -> int:
         """Calculate pattern length in bars from events."""
+        if not self.slot_has_pattern(self.current_slot):
+            return DEFAULT_PATTERN_LENGTH_BARS
+
         ptninfo_length = self.get_ptninfo_length_bars(self.current_slot)
         if ptninfo_length is not None:
             return ptninfo_length
@@ -688,6 +693,11 @@ class PatternModel:
             return None
         offset = slot_index * 4
         return bytes(self.ptninfo_raw[offset:offset + 4])
+
+    def slot_has_pattern(self, slot_index: int) -> bool:
+        if self.ptninfo is None or not (0 <= slot_index < SLOT_COUNT):
+            return False
+        return bool(self.ptninfo.slots[slot_index].has_pattern)
 
     def get_mapping_index(self, slot_index: int) -> Optional[int]:
         entry = self.get_ptninfo_entry(slot_index)
