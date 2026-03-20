@@ -403,12 +403,13 @@ existing ones.
 
   How to use:
     1. Edit > Stamp Pattern
-    2. Choose a machine and a pattern
+    2. Choose a machine and a pattern (Grid or Compound)
     3. Pick a target pad (e.g. A1)
     4. Click Stamp
 
-  Patterns are timing templates captured from machines that used
-  compound rhythms (e.g. overlaid 8th notes and 16th triplets).
+  - Compound Patterns are raw musical performances (e.g. flams, rolls).
+  - Grid Grooves create a straight rhythmic grid using that machine's
+    timing feel (e.g. a steady 16th note hi-hat).
 
   This is undoable (Ctrl+Z).
 
@@ -1694,18 +1695,9 @@ AVAILABLE MACHINES
         dialog.geometry(f"+{x}+{y}")
 
     def on_stamp_pattern(self):
-        """Stamp a compound rhythm pattern into the current slot on a chosen pad."""
+        """Stamp a groove or rhythm pattern into the current slot on a chosen pad."""
         if not self.groove_library.machines:
             messagebox.showwarning("Stamp Pattern", "No groove files found in grooves/ folder")
-            return
-
-        # Check which machines have compound patterns
-        machines_with_compounds = [
-            m for m in self.groove_library.machines
-            if any(g.groove_type == "compound" for g in self.groove_library.get_grooves(m))
-        ]
-        if not machines_with_compounds:
-            messagebox.showwarning("Stamp Pattern", "No compound patterns found in groove library")
             return
 
         dialog = tk.Toplevel(self.root)
@@ -1725,12 +1717,12 @@ AVAILABLE MACHINES
         ttk.Label(dialog, text="Machine:").pack(pady=(10, 4))
         machine_var = tk.StringVar()
         machine_combo = ttk.Combobox(dialog, textvariable=machine_var,
-                                     values=machines_with_compounds,
+                                     values=self.groove_library.machines,
                                      state="readonly", width=30)
         machine_combo.pack(padx=20)
 
         # Pattern listbox
-        ttk.Label(dialog, text="Pattern:").pack(pady=(10, 4))
+        ttk.Label(dialog, text="Groove/Pattern:").pack(pady=(10, 4))
         list_frame = ttk.Frame(dialog)
         list_frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=(0, 6))
         scrollbar = ttk.Scrollbar(list_frame)
@@ -1739,6 +1731,7 @@ AVAILABLE MACHINES
                                      bg="#1a1a1a", fg="#cccccc",
                                      selectbackground="#335533",
                                      selectforeground="#ffffff",
+                                     exportselection=False,
                                      font=("TkFixedFont", 11))
         pattern_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         scrollbar.config(command=pattern_listbox.yview)
@@ -1759,11 +1752,20 @@ AVAILABLE MACHINES
             current_patterns.clear()
             pattern_listbox.delete(0, tk.END)
             machine = machine_var.get()
-            patterns = [g for g in self.groove_library.get_grooves(machine)
-                        if g.groove_type == "compound"]
+            patterns = self.groove_library.get_grooves(machine)
             current_patterns.extend(patterns)
             for g in patterns:
-                pattern_listbox.insert(tk.END, f"{g.name}  ({len(g.ticks)} hits)")
+                if g.groove_type == "compound":
+                    label = f"{g.name}  ({len(g.ticks)} hits)"
+                else:
+                    label = f"{g.name}  [{g.grid_label}]"
+                pattern_listbox.insert(tk.END, label)
+            
+            # Select first item by default when machine changes
+            if pattern_listbox.size() > 0:
+                pattern_listbox.selection_set(0)
+                pattern_listbox.activate(0)
+
             attr = self.groove_library.get_attribution(machine)
             if attr:
                 attr_var.set(f"Grooves by {attr.get('author', '?')}  •  {attr.get('license', '')}")
@@ -1796,7 +1798,8 @@ AVAILABLE MACHINES
 
         pattern_listbox.bind("<Double-1>", lambda _e: apply_selected())
 
-        if machines_with_compounds:
+        # Select first machine by default
+        if self.groove_library.machines:
             machine_combo.current(0)
             on_machine_change()
 
