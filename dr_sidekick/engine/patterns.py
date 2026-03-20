@@ -234,8 +234,8 @@ class PatternModel:
             if truncated_events > 0:
                 self.events = fitted_events
                 self.last_save_warning = (
-                    "CAPACITY EXCEEDED: current pattern exceeds SP-303 storage limits. "
-                    f"Removed {truncated_events} trailing event(s) to fit the 112-event / tuple capacity."
+                    "This pattern is too dense for the SP-303 and some notes were removed when saving. "
+                    f"Try reducing the pattern length below {length_bars} bar(s) to fit more notes."
                 )
                 log.warning(
                     "Pattern save truncated slot %s: removed %d trailing event(s); "
@@ -488,7 +488,7 @@ class PatternModel:
             )
         if truncated_events > 0:
             warning_parts.append(
-                "CAPACITY EXCEEDED: removed trailing event(s) to fit the SP-303 tuple capacity."
+                f"This pattern is too dense for the SP-303. Try reducing the pattern length below {length_bars} bar(s) to fit more notes."
             )
         if warning_parts:
             self.last_stamp_warning = " ".join(warning_parts)
