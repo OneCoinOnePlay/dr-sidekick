@@ -351,6 +351,34 @@ class PatternModel:
         event.velocity = max(0, min(127, velocity))
         self.dirty = True
 
+    def reassign_pad(
+        self,
+        source_pad: int,
+        target_pad: int,
+        events: Optional[List[Event]] = None,
+    ) -> int:
+        """Move events from one pad to another as a single undoable operation."""
+        if source_pad == target_pad:
+            return 0
+
+        if events is None:
+            candidates = [event for event in self.events if event.pad == source_pad]
+        else:
+            candidates = [
+                event for event in events
+                if event in self.events and event.pad == source_pad
+            ]
+
+        if not candidates:
+            return 0
+
+        self.push_undo_state()
+        for event in candidates:
+            event.pad = target_pad
+        self.events.sort(key=lambda event: event.tick)
+        self.dirty = True
+        return len(candidates)
+
     def quantize_events(self, events: List[Event], quantize_ticks: int):
         """Quantize selected events to grid."""
         if quantize_ticks <= 0:
