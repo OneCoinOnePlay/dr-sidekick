@@ -18,7 +18,9 @@ import sys
 import traceback
 
 # ── Session logger ────────────────────────────────────────────────────────────
-_LOG_PATH = Path(__file__).parent / "Dr_Sidekick.log"
+_LOG_DIR = Path(__file__).parent / "logs"
+_LOG_DIR.mkdir(parents=True, exist_ok=True)
+_LOG_PATH = _LOG_DIR / "Dr_Sidekick.log"
 _log_handler = RotatingFileHandler(
     _LOG_PATH, maxBytes=1_000_000, backupCount=2, encoding="utf-8"
 )
