@@ -268,12 +268,21 @@ class PianoRollCanvas(tk.Canvas):
         # Draw grid based on snap setting, or every quarter note if snap is off
         grid_interval = self.grid_snap if self.grid_snap > 0 else 96
 
+        bar_ticks = 4 * INTERNAL_PPQN  # 384 ticks per bar
+
         for tick in range(left_tick - (left_tick % grid_interval), right_tick + 1, grid_interval):
             x = self.tick_to_x(tick)
+            # Bar line every 384 ticks (4 quarter notes)
+            if (tick % bar_ticks) == 0:
+                color = self.colors["grid_bar"]
+                width_val = 2
             # Major beat line every 96 ticks (quarter note)
-            is_major = (tick % 96) == 0
-            color = self.colors["grid_major"] if is_major else self.colors["grid_minor"]
-            width_val = 2 if is_major else 1
+            elif (tick % 96) == 0:
+                color = self.colors["grid_major"]
+                width_val = 1
+            else:
+                color = self.colors["grid_minor"]
+                width_val = 1
             self.create_line(
                 x, top_py + ruler_height, x, bottom_py,
                 fill=color, width=width_val, tags="grid"
