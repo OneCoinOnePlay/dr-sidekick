@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import math
 from dataclasses import dataclass
 from pathlib import Path
@@ -22,10 +23,13 @@ from .core import (
     SLOT_COUNT,
     TICKS_PER_BAR,
     TUPLE_ZONE_MAX_BYTES,
+    TUPLE_ZONE_SENTINEL_BYTES,
     Event,
     GrooveTemplate,
     load_midi_notes,
 )
+
+log = logging.getLogger("dr_sidekick")
 
 
 @dataclass
@@ -58,6 +62,7 @@ class PatternModel:
         self.ptndata_path: Optional[Path] = None
         self.slot_clipboard: Optional[List[Event]] = None
         self.last_save_warning: Optional[str] = None
+        self.last_stamp_warning: Optional[str] = None
 
     def new_pattern(self):
         """Create new pattern files."""
@@ -232,6 +237,15 @@ class PatternModel:
                     "CAPACITY EXCEEDED: current pattern exceeds SP-303 storage limits. "
                     f"Removed {truncated_events} trailing event(s) to fit the 112-event / tuple capacity."
                 )
+                log.warning(
+                    "Pattern save truncated slot %s: removed %d trailing event(s); "
+                    "kept=%d loop_bars=%d storage_slot=%d",
+                    self.current_slot + 1,
+                    truncated_events,
+                    len(fitted_events),
+                    length_bars,
+                    self.current_storage_slot + 1,
+                )
 
             self.ptndata.write_pattern(
                 self.current_storage_slot,
@@ -279,8 +293,9 @@ class PatternModel:
         capped_events = events[:MAX_PATTERN_EVENT_CAPACITY]
         truncated_events = len(events) - len(capped_events)
 
+        max_serialized_len = TUPLE_ZONE_MAX_BYTES - TUPLE_ZONE_SENTINEL_BYTES
         serialized_len = encoded_len(capped_events)
-        if serialized_len <= TUPLE_ZONE_MAX_BYTES:
+        if serialized_len <= max_serialized_len:
             return capped_events, truncated_events, max(1, total_length_ticks)
 
         low, high = 1, len(capped_events)
@@ -288,7 +303,7 @@ class PatternModel:
         while low <= high:
             mid = (low + high) // 2
             mid_len = encoded_len(capped_events[:mid])
-            if mid_len <= TUPLE_ZONE_MAX_BYTES:
+            if mid_len <= max_serialized_len:
                 fit_count = mid
                 low = mid + 1
             else:
@@ -306,7 +321,7 @@ class PatternModel:
                 total_length_ticks=max(1, total_length_ticks),
             )
         )
-        if fallback_len <= TUPLE_ZONE_MAX_BYTES:
+        if fallback_len <= max_serialized_len:
             return fallback, max(0, len(events) - 1), max(1, total_length_ticks)
         return [], len(events), max(1, total_length_ticks)
 
@@ -432,21 +447,63 @@ class PatternModel:
         Returns the number of events added.
         """
         self.push_undo_state()
-        added = 0
+        self.last_stamp_warning = None
+        length_bars = (
+            self.get_ptninfo_length_bars(self.current_slot) or DEFAULT_PATTERN_LENGTH_BARS
+        )
+        total_length_ticks = self._total_length_ticks_for_bars(length_bars)
+        original_count = len(self.events)
+        stamped_events: List[Event] = []
 
         if groove.groove_type == "compound" and groove.ticks:
             for tick in groove.ticks:
-                self.events.append(Event(tick=tick, pad=pad, velocity=velocity))
-                added += 1
+                stamped_events.append(Event(tick=tick, pad=pad, velocity=velocity))
         elif groove.groove_type == "grid" and groove.grid > 0 and groove.offsets:
             for step, offset in enumerate(groove.offsets):
                 tick = max(0, (step * groove.grid) + offset)
-                self.events.append(Event(tick=tick, pad=pad, velocity=velocity))
-                added += 1
+                stamped_events.append(Event(tick=tick, pad=pad, velocity=velocity))
 
-        if added > 0:
-            self.events.sort(key=lambda event: event.tick)
-            self.dirty = True
+        if not stamped_events:
+            return 0
+
+        kept_stamped_events = [
+            event for event in stamped_events
+            if 0 <= event.tick < total_length_ticks
+        ]
+        clipped_events = len(stamped_events) - len(kept_stamped_events)
+        candidate_events = self.events + kept_stamped_events
+        candidate_events.sort(key=lambda event: event.tick)
+        fitted_events, truncated_events, _ = self._fit_events_to_tuple_capacity(
+            candidate_events,
+            total_length_ticks=total_length_ticks,
+        )
+        self.events = fitted_events
+        added = max(0, len(self.events) - original_count)
+        self.dirty = True
+
+        warning_parts = []
+        if clipped_events > 0:
+            warning_parts.append(
+                f"Removed {clipped_events} event(s) beyond the current {length_bars}-bar pattern length."
+            )
+        if truncated_events > 0:
+            warning_parts.append(
+                "CAPACITY EXCEEDED: removed trailing event(s) to fit the SP-303 tuple capacity."
+            )
+        if warning_parts:
+            self.last_stamp_warning = " ".join(warning_parts)
+            log.warning(
+                "Pattern stamp adjusted slot %s: groove='%s' pad=0x%02X stamped=%d kept=%d "
+                "clipped_by_length=%d clipped_by_capacity=%d loop_bars=%d",
+                self.current_slot + 1,
+                groove.name,
+                pad,
+                len(stamped_events),
+                added,
+                clipped_events,
+                truncated_events,
+                length_bars,
+            )
 
         return added
 

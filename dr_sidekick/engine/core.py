@@ -164,7 +164,6 @@ class GrooveLibrary:
                     templates.append(tmpl)
                 self._by_machine[machine] = templates
                 self.machines.append(machine)
-                log.debug("Loaded %d grooves for %s", len(templates), machine)
             except Exception:
                 log.error("Failed to load groove file %s:\n%s", json_path, traceback.format_exc())
 
@@ -488,9 +487,11 @@ class PTNData:
         data_offset = slot_offset + 0x70
         serialized = self.encode_events(events, total_length_ticks=total_length_ticks)
         tuple_zone_end = slot_offset + 0x272
-        if data_offset + len(serialized) > tuple_zone_end:
+        max_serialized_len = (tuple_zone_end - data_offset) - TUPLE_ZONE_SENTINEL_BYTES
+        if len(serialized) > max_serialized_len:
             raise ValueError(
-                f"Pattern too large for tuple zone: {len(serialized)} bytes (max {tuple_zone_end - data_offset})"
+                f"Pattern too large for tuple zone: {len(serialized)} bytes "
+                f"(max {max_serialized_len}, reserving {TUPLE_ZONE_SENTINEL_BYTES} bytes for the end marker)"
             )
         self.data[data_offset:data_offset+len(serialized)] = serialized
         
@@ -2358,6 +2359,7 @@ SLOT_COUNT = 16
 DEFAULT_PATTERN_LENGTH_BARS = 4  # Default pattern length
 MAX_PATTERN_LENGTH_BARS = 99  # SP-303 hardware maximum
 TUPLE_ZONE_MAX_BYTES = 0x272 - 0x70  # PTNDATA event payload capacity per pattern slot
+TUPLE_ZONE_SENTINEL_BYTES = 6  # Reserve one fill/end tuple so decoding stops inside the tuple zone.
 APP_VERSION = "0.5.0"
 
 
