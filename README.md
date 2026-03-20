@@ -1,6 +1,6 @@
 # Dr. Sidekick
 
-**Boss Dr. Sample SP-303** Graphical pattern editor and SmartMedia librarian.
+**Boss Dr. Sample SP-303** Pattern Sequencer and SmartMedia librarian.
 
 ![Beta](https://img.shields.io/badge/status-beta-orange)
 ![Python 3](https://img.shields.io/badge/python-3.x-blue)
@@ -18,7 +18,7 @@
 
 ## What It Does
 
-**Pattern Editor** — draw, edit, and arrange pad events on a piano-roll canvas
+**Pattern Sequencer** — draw, edit, and arrange pad events on a piano-roll canvas
 
 - 32 pad lanes across Banks A, B, C & D
 - Draw, Select, and Erase editing modes
@@ -74,6 +74,8 @@ chmod +x Dr_Sidekick.py
 ## Status
 
 Beta. Core workflows are functional and have been tested against SP-303 hardware.
+
+Current release: `v0.7.0`
 
 RDAC audio decoding is experimental — samples are recognisable but noisy. Structural accuracy (pattern selection, bit extraction, hierarchical interpolation) is confirmed with 0.93 spectral correlation to hardware output.
 
