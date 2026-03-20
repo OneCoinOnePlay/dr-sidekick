@@ -417,19 +417,33 @@ class PatternModel:
 
     def stamp_pattern(self, groove: GrooveTemplate, pad: int,
                       velocity: int = 0x7F) -> int:
-        """Stamp a compound groove pattern into the current slot.
+        """Stamp a groove pattern into the current slot on a chosen pad.
 
-        Creates new events on the given pad at each tick position in the
-        groove's tick list.  Returns the number of events added.
+        For compound grooves, creates new events at each tick position in the
+        groove's tick list.
+        For grid grooves, creates new events at each grid step, applying the
+        groove's timing offsets.
+
+        Returns the number of events added.
         """
-        if groove.groove_type != "compound" or not groove.ticks:
-            return 0
         self.push_undo_state()
-        for tick in groove.ticks:
-            self.events.append(Event(tick=tick, pad=pad, velocity=velocity))
-        self.events.sort(key=lambda event: event.tick)
-        self.dirty = True
-        return len(groove.ticks)
+        added = 0
+
+        if groove.groove_type == "compound" and groove.ticks:
+            for tick in groove.ticks:
+                self.events.append(Event(tick=tick, pad=pad, velocity=velocity))
+                added += 1
+        elif groove.groove_type == "grid" and groove.grid > 0 and groove.offsets:
+            for step, offset in enumerate(groove.offsets):
+                tick = max(0, (step * groove.grid) + offset)
+                self.events.append(Event(tick=tick, pad=pad, velocity=velocity))
+                added += 1
+
+        if added > 0:
+            self.events.sort(key=lambda event: event.tick)
+            self.dirty = True
+
+        return added
 
     def copy_slot(self):
         """Copy current slot events to clipboard."""
