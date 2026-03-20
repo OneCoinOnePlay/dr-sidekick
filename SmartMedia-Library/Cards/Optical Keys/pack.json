@@ -1,0 +1,25 @@
+{
+  "format": "sp303-pack",
+  "title": "Optical Keys",
+  "attribution": {
+    "author": "Immy"
+  },
+  "card": {
+    "device": "SP-303",
+    "categories": [],
+    "tags": [],
+    "pad_notes": {
+      "C1": "Optigan",
+      "C2": "Optigan",
+      "C3": "Optigan",
+      "C4": "Optigan",
+      "C5": "Talentmaker",
+      "C6": "Talentmaker",
+      "C7": "Talentmaker",
+      "C8": "Talentmaker"
+    },
+    "write_protect": false,
+    "created": "2026-03-17T22:22:55",
+    "modified": "2026-03-17T22:44:31"
+  }
+}

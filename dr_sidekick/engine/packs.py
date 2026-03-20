@@ -74,23 +74,23 @@ def promote_card_to_pack(
 ) -> Path:
     """Copy a SmartMedia card into packs/ as a sample pack.
 
-    Reads card.json for metadata, scans SMPINFO0.SP0 for sample layout,
-    checks PTNINFO0.SP0 for active patterns, copies all SP0 files, and
-    writes a single pack.json (no card.json in the output).
+    Reads the card's pack.json (or legacy card.json), scans SMPINFO0.SP0 for
+    sample layout, checks for patterns, copies all SP0 files, and writes a
+    pack.json with the content block populated.
 
     Returns the path to the new pack directory.
     """
-    from .core import SMPINFO
+    from .core import SMPINFO, VirtualCard
 
-    card_json_path = card_dir / "card.json"
-    if not card_json_path.exists():
-        raise ValueError(f"No card.json found in {card_dir}")
+    manifest_path = card_dir / "pack.json"
+    if not manifest_path.exists():
+        raise ValueError(f"No pack.json found in {card_dir}")
 
-    with open(card_json_path, "r", encoding="utf-8") as f:
-        card_data = json.load(f)
+    with open(manifest_path, "r", encoding="utf-8") as f:
+        raw_data = json.load(f)
 
-    card_name = card_data.get("name", card_dir.name)
-    safe_name = card_name.lower().replace(" ", "-").replace("/", "-")
+    card = VirtualCard.from_dict(raw_data, card_dir)
+    safe_name = card.name.lower().replace(" ", "-").replace("/", "-")
     pack_dir = packs_dir / safe_name
     pack_dir.mkdir(parents=True, exist_ok=True)
 
@@ -101,7 +101,6 @@ def promote_card_to_pack(
     # Scan SMPINFO for bank layout
     banks: Dict[str, dict] = {}
     smpinfo_path = card_dir / "SMPINFO0.SP0"
-    pad_notes = card_data.get("pad_notes", {})
     if smpinfo_path.exists():
         smpinfo = SMPINFO.from_file(smpinfo_path)
         for slot in smpinfo.slots:
@@ -114,10 +113,9 @@ def promote_card_to_pack(
                 "file": slot.sample_filenames[0],
                 "stereo": slot.is_stereo,
             }
-            # Pull pad note from card metadata
             pad_key = f"{bank}{pad}"
-            if pad_key in pad_notes:
-                sample_entry["note"] = pad_notes[pad_key]
+            if pad_key in card.pad_notes:
+                sample_entry["note"] = card.pad_notes[pad_key]
             banks.setdefault(bank, {"samples": []})
             banks[bank]["samples"].append(sample_entry)
 
@@ -133,30 +131,17 @@ def promote_card_to_pack(
     if has_patterns:
         content["patterns"] = {"files": ["PTNINFO0.SP0", "PTNDATA0.SP0"]}
 
-    pack_data = {
-        "format": "sp303-pack",
-        "version": "3.0",
-        "title": card_name,
-        "description": description or f"Sample pack from {card_name}",
-        "attribution": {
-            "author": card_data.get("author", ""),
-            "url": url,
-            "license": license_text,
-        },
-        "content": content,
-        "card": {
-            "device": card_data.get("device", "SP-303"),
-            "categories": card_data.get("categories", []),
-            "tags": card_data.get("tags", []),
-            "write_protect": card_data.get("write_protect", False),
-            "created": card_data.get("created", ""),
-            "modified": datetime.now().isoformat(timespec="seconds"),
-        },
-    }
+    # Build pack.json — override description/url/license from dialog inputs
+    pack_data = card.to_dict()
+    pack_data["description"] = description or f"Sample pack from {card.name}"
+    pack_data["attribution"]["url"] = url
+    pack_data["attribution"]["license"] = license_text
+    pack_data["content"] = content
+    pack_data["card"]["modified"] = datetime.now().isoformat(timespec="seconds")
 
     with open(pack_dir / "pack.json", "w", encoding="utf-8") as f:
         json.dump(pack_data, f, indent=2)
         f.write("\n")
 
-    log.info("Promoted card '%s' to pack at %s", card_name, pack_dir)
+    log.info("Promoted card '%s' to pack at %s", card.name, pack_dir)
     return pack_dir
