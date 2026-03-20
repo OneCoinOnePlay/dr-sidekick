@@ -1,4 +1,4 @@
-"""Sample workflow UI and actions extracted from Pattern Manager."""
+"""Sample workflow UI and actions extracted from Pattern Sequencer."""
 
 from __future__ import annotations
 
