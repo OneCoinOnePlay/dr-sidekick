@@ -39,7 +39,7 @@ class SmartMediaLibraryWindow:
         self.state = state
         self._on_open_sample_manager = on_open_sample_manager
         self._on_open_pattern_sequencer = on_open_pattern_sequencer
-        self.root.title("Dr. Sidekick — SmartMedia Library")
+        self.root.title("Dr. Sidekick — One Coin One Play")
         self.root.geometry("1200x720")
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
@@ -615,7 +615,7 @@ A: Quick Import does not alter the audio level of your WAV files. If samples
 
         tk.Label(
             container,
-            text="Standalone graphical pattern editor and SmartMedia librarian for the BOSS Dr. Sample SP-303",
+            text="Pattern Sequencer and SmartMedia Librarian for the BOSS Dr. Sample SP-303",
             wraplength=580,
             justify=tk.LEFT,
             bg="#000000",
@@ -662,7 +662,7 @@ A: Quick Import does not alter the audio level of your WAV files. If samples
         header_frame = ttk.Frame(frame)
         header_frame.pack(fill=tk.X, pady=(0, 6))
         ttk.Label(header_frame, text="Dr. Sidekick", font=("Courier", 18, "bold")).pack(side=tk.LEFT)
-        ttk.Label(header_frame, text="Pattern editor and SmartMedia librarian for the Boss Dr. Sample SP-303.",
+        ttk.Label(header_frame, text="Pattern Sequencer and SmartMedia librarian for the Boss Dr. Sample SP-303",
                   font=("Courier", 9)).pack(side=tk.LEFT, padx=(12, 0), anchor=tk.S, pady=(0, 3))
         ttk.Button(header_frame, text="Open Pattern Sequencer",
                    command=self.open_pattern_sequencer).pack(side=tk.RIGHT)
@@ -779,9 +779,44 @@ A: Quick Import does not alter the audio level of your WAV files. If samples
 
         filter_row = ttk.Frame(left_frame)
         filter_row.pack(fill=tk.X, pady=(0, 4))
+        search_placeholder = "Search"
+        search_placeholder_active = [False]
         search_var = tk.StringVar()
-        search_entry = ttk.Entry(filter_row, textvariable=search_var)
+        search_entry = tk.Entry(
+            filter_row,
+            textvariable=search_var,
+            bg="#000000",
+            fg="#7a7a7a",
+            insertbackground="#ffffff",
+            relief=tk.FLAT,
+            highlightthickness=1,
+            highlightbackground="#222222",
+            highlightcolor="#2a7fff",
+        )
         search_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 4))
+
+        def show_search_placeholder():
+            search_placeholder_active[0] = True
+            search_var.set(search_placeholder)
+            search_entry.configure(fg="#7a7a7a")
+            search_entry.icursor(0)
+
+        def hide_search_placeholder():
+            if search_placeholder_active[0]:
+                search_placeholder_active[0] = False
+                search_var.set("")
+                search_entry.configure(fg="#ffffff")
+
+        def on_search_focus_in(_event):
+            hide_search_placeholder()
+
+        def on_search_focus_out(_event):
+            if not search_var.get().strip():
+                show_search_placeholder()
+
+        search_entry.bind("<FocusIn>", on_search_focus_in)
+        search_entry.bind("<FocusOut>", on_search_focus_out)
+        show_search_placeholder()
 
         card_tree_cols = ("name", "author", "ptn", "pack")
         style = ttk.Style(self.root)
@@ -881,7 +916,7 @@ A: Quick Import does not alter the audio level of your WAV files. If samples
                 pack_cards[card.name] = card
 
         def get_all_cards():
-            query = search_var.get().strip().lower()
+            query = "" if search_placeholder_active[0] else search_var.get().strip().lower()
             cards = self.state.smartmedia_lib.list_cards()
             _load_pack_cards()
             packs = list(pack_cards.values())
