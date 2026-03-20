@@ -12,7 +12,7 @@
 
 ![Sample Manager](screenshots/2-sample-manager.png)
 
-![Pattern Manager](screenshots/3-pattern-manager.png)
+![Pattern Sequencer](screenshots/3-pattern-sequencer.png)
 
 ---
 

@@ -1,4 +1,4 @@
-"""Pattern Manager window extracted from the legacy monolith."""
+"""Pattern Sequencer window extracted from the legacy monolith."""
 
 from __future__ import annotations
 
@@ -40,7 +40,7 @@ if TYPE_CHECKING:
 
 log = logging.getLogger("dr_sidekick")
 
-class PatternManagerWindow:
+class PatternSequencerWindow:
     """Main application window"""
 
     def __init__(self, root, state: 'AppState', lib_win: SmartMediaLibraryWindow, debug_mode: bool = False):
@@ -48,7 +48,7 @@ class PatternManagerWindow:
         self.state = state
         self.lib_win = lib_win
         self.debug_mode = debug_mode
-        self.root.title("Dr. Sidekick — Pattern Manager")
+        self.root.title("Dr. Sidekick — Pattern Sequencer")
         self.root.configure(bg="#000000")
         self.root.protocol("WM_DELETE_WINDOW", self.on_hide)
 
@@ -110,7 +110,7 @@ class PatternManagerWindow:
 
 
     def on_hide(self):
-        """Hide the Pattern Manager and return focus to the Library window."""
+        """Hide the Pattern Sequencer and return focus to the Library window."""
         self.root.withdraw()
         self.lib_win.root.deiconify()
         self.lib_win.root.lift()
@@ -136,7 +136,7 @@ class PatternManagerWindow:
         self.file_menu.add_command(label="Save", command=self.on_save, accelerator="Ctrl+S")
         self.file_menu.add_command(label="Save As...", command=self.on_save_as, accelerator="Ctrl+Shift+S")
         self.file_menu.add_separator()
-        self.file_menu.add_command(label="Close Pattern Manager", command=self.on_exit, accelerator="Ctrl+Q")
+        self.file_menu.add_command(label="Close Pattern Sequencer", command=self.on_exit, accelerator="Ctrl+Q")
 
         # Initialize recent files menu
         self.update_recent_files_menu()
@@ -237,7 +237,7 @@ class PatternManagerWindow:
                 ("Ctrl+O",        "Open Pattern"),
                 ("Ctrl+S",        "Save"),
                 ("Ctrl+Shift+S",  "Save As"),
-                ("Ctrl+Q",        "Close Pattern Manager"),
+                ("Ctrl+Q",        "Close Pattern Sequencer"),
             ]),
             ("EDIT", [
                 ("Ctrl+Z",        "Undo"),
@@ -878,7 +878,7 @@ AVAILABLE MACHINES
             messagebox.showerror("Error", f"Failed to save pattern: {e}")
 
     def on_exit(self):
-        """Close the Pattern Manager and return focus to the Library."""
+        """Close the Pattern Sequencer and return focus to the Library."""
         if self.model.dirty:
             if not messagebox.askyesno("Unsaved Changes", "Close without saving?"):
                 return

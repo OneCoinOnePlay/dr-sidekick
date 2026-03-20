@@ -32,12 +32,12 @@ class SmartMediaLibraryWindow:
         state: 'AppState',
         *,
         on_open_sample_manager: Callable[[Optional[Path]], None],
-        on_open_pattern_manager: Callable[[], None],
+        on_open_pattern_sequencer: Callable[[], None],
     ):
         self.root = root
         self.state = state
         self._on_open_sample_manager = on_open_sample_manager
-        self._on_open_pattern_manager = on_open_pattern_manager
+        self._on_open_pattern_sequencer = on_open_pattern_sequencer
         self.root.title("Dr. Sidekick — SmartMedia Library")
         self.root.geometry("1200x720")
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -145,8 +145,8 @@ class SmartMediaLibraryWindow:
             command=self.open_sample_manager,
             accelerator="Ctrl+Shift+M",
         )
-        file_menu.add_command(label="Open Pattern Manager",
-                              command=self.open_pattern_manager, accelerator="Ctrl+Shift+L")
+        file_menu.add_command(label="Open Pattern Sequencer",
+                              command=self.open_pattern_sequencer, accelerator="Ctrl+Shift+L")
         file_menu.add_separator()
         file_menu.add_command(label="Exit", command=self._on_close)
 
@@ -181,18 +181,18 @@ class SmartMediaLibraryWindow:
         # Keyboard shortcuts
         self.root.bind("<Control-Shift-M>", lambda e: self.open_sample_manager())
         self.root.bind("<Control-Shift-m>", lambda e: self.open_sample_manager())
-        self.root.bind("<Control-Shift-L>", lambda e: self.open_pattern_manager())
-        self.root.bind("<Control-Shift-l>", lambda e: self.open_pattern_manager())
+        self.root.bind("<Control-Shift-L>", lambda e: self.open_pattern_sequencer())
+        self.root.bind("<Control-Shift-l>", lambda e: self.open_pattern_sequencer())
 
-    # ── Pattern Manager ──────────────────────────────────────────────────
+    # ── Pattern Sequencer ────────────────────────────────────────────────
 
     def open_sample_manager(self, smpinfo_path: Optional[Path] = None) -> None:
         """Delegate Sample Manager launch to the application controller."""
         self._on_open_sample_manager(smpinfo_path)
 
-    def open_pattern_manager(self) -> None:
-        """Delegate Pattern Manager launch to the application controller."""
-        self._on_open_pattern_manager()
+    def open_pattern_sequencer(self) -> None:
+        """Delegate Pattern Sequencer launch to the application controller."""
+        self._on_open_pattern_sequencer()
 
     def _on_close(self):
         """Quit the application."""
@@ -232,7 +232,7 @@ From the library you can branch into two main areas:
 
 WORK ON PATTERNS
 ─────────────────────────────────────────────
-Open the Pattern Manager: File -> Open Pattern Manager (or Ctrl+Shift+L).
+Open the Pattern Sequencer: File -> Open Pattern Sequencer (or Ctrl+Shift+L).
 
   • Select a pattern slot (C1–D8), switch to Draw mode, and click the pad
     rows to place hits. Drag to move them, right-click to delete.
@@ -284,8 +284,8 @@ Example 1: Load a Kit and Program a Pattern from Scratch
 Goal: Get your own samples onto the SP-303 and program a beat
       ready to play back on the hardware.
 
-Step 1 — Open the Pattern Manager.
-  In the SmartMedia Library window: File -> Open Pattern Manager (Ctrl+Shift+L).
+Step 1 — Open the Pattern Sequencer.
+  In the SmartMedia Library window: File -> Open Pattern Sequencer (Ctrl+Shift+L).
 
 Step 2 — Load your samples onto the card.
   Open Sample Manager, then Samples -> Quick Import WAV Folder.
@@ -364,7 +364,7 @@ Step 3 — Reassign pads.
   The status bar confirms every change.
 
 Step 4 — Remap or exchange patterns.
-  In the Pattern Manager use Edit -> Copy Pattern / Paste Pattern
+  In the Pattern Sequencer use Edit -> Copy Pattern / Paste Pattern
   to move patterns between slots without re-programming.
 
 Step 5 — Write changes.
@@ -416,10 +416,10 @@ Step 5 — Iterate.
         """Show FAQ and troubleshooting notes for beta users."""
         faq = """FAQ / Troubleshooting (Beta)
 
-Q: Where do I start — the SmartMedia Library or the Pattern Manager?
+Q: Where do I start — the SmartMedia Library or the Pattern Sequencer?
 A: The SmartMedia Library window opens first and is always present. Use it to
-   manage your virtual cards. Open the Pattern Manager from File -> Open Pattern
-   Manager (or Ctrl+Shift+L) when you need to edit patterns or work with samples.
+   manage your virtual cards. Open the Pattern Sequencer from File -> Open Pattern
+   Sequencer (or Ctrl+Shift+L) when you need to edit patterns or work with samples.
 
 Q: I selected a single WAV file in Quick Import. Is that valid?
 A: Yes. The app uses that file's parent folder automatically.
@@ -661,8 +661,8 @@ A: Quick Import does not alter the audio level of your WAV files. If samples
         ttk.Label(header_frame, text="Dr. Sidekick", font=("Courier", 18, "bold")).pack(side=tk.LEFT)
         ttk.Label(header_frame, text="Pattern editor and SmartMedia librarian for the Boss Dr. Sample SP-303.",
                   font=("Courier", 9)).pack(side=tk.LEFT, padx=(12, 0), anchor=tk.S, pady=(0, 3))
-        ttk.Button(header_frame, text="Open Pattern Manager",
-                   command=self.open_pattern_manager).pack(side=tk.RIGHT)
+        ttk.Button(header_frame, text="Open Pattern Sequencer",
+                   command=self.open_pattern_sequencer).pack(side=tk.RIGHT)
         ttk.Button(header_frame, text="Open Sample Manager",
                    command=self.open_sample_manager).pack(side=tk.RIGHT, padx=(0, 6))
 
