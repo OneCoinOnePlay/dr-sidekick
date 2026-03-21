@@ -17,6 +17,7 @@ FIRMWARE_SINGLE_SOURCE.md
 test_*.bin
 
 # User data and local content
+SmartMedia-Library/Cards/
 Backup/
 snapshots/
 logs/
