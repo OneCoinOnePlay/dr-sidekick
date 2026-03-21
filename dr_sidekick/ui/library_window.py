@@ -971,6 +971,18 @@ A: Quick Import does not alter the audio level of your WAV files. If samples
         card_tree.bind("<<TreeviewSelect>>", on_card_select)
         search_var.trace_add("write", lambda *_: refresh_card_list())
 
+        def selected_virtual_card() -> Optional[VirtualCard]:
+            card = current_card[0]
+            if card is not None:
+                return card
+            sel = card_tree.selection()
+            if not sel:
+                return None
+            card = pack_cards.get(sel[0]) or self.state.smartmedia_lib.get_card(sel[0])
+            if card is not None:
+                current_card[0] = card
+            return card
+
         def save_current_card():
             card = current_card[0]
             if card is None:
@@ -1043,8 +1055,9 @@ A: Quick Import does not alter the audio level of your WAV files. If samples
 
         def open_in_manager():
             smpinfo = active_smpinfo[0]
-            if smpinfo is None and current_card[0] is not None:
-                candidate = self.state.smartmedia_lib.cards_dir / current_card[0].name / "SMPINFO0.SP0"
+            card = selected_virtual_card()
+            if smpinfo is None and card is not None:
+                candidate = self.state.smartmedia_lib.cards_dir / card.name / "SMPINFO0.SP0"
                 if candidate.exists():
                     smpinfo = candidate
             if smpinfo is None:
