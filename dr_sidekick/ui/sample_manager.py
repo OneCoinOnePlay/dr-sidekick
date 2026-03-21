@@ -29,6 +29,7 @@ from dr_sidekick.engine import (
     sp303_decode_sp0,
     sp303_write_wav,
 )
+from dr_sidekick.ui.branding import create_brand_header
 from dr_sidekick.ui.dialogs import show_text_dialog
 
 try:
@@ -273,7 +274,11 @@ def open_sample_manager(host: SampleManagerHost, smpinfo_path: Optional[Path] = 
     session = AssignmentSession()
     dialog = tk.Toplevel(host.root)
     card_label = smpinfo_path.parent.name if smpinfo_path else "No card loaded"
-    dialog.title(f"Sample Manager — {card_label}" if smpinfo_path else "Sample Manager")
+    dialog.title(
+        f"Dr. Sidekick — Sample Manager ({card_label})"
+        if smpinfo_path
+        else "Dr. Sidekick — Sample Manager"
+    )
     dialog.geometry("1180x680")
     dialog.transient(host.root)
     dialog.grab_set()
@@ -282,15 +287,10 @@ def open_sample_manager(host: SampleManagerHost, smpinfo_path: Optional[Path] = 
     frame = ttk.Frame(dialog, padding=10)
     frame.pack(fill=tk.BOTH, expand=True)
 
-    ttk.Label(frame, text="Sample Manager", font=("Courier", 13, "bold")).pack(anchor=tk.W, pady=(0, 2))
-    ttk.Label(
+    create_brand_header(
         frame,
-        text="Helps you manage the samples on your SmartMedia card. You can also reorganise the order by dragging them into new positions.",
-    ).pack(anchor=tk.W, pady=(0, 4))
-    ttk.Label(
-        frame,
-        text="Coming Soon: Long/Lo-Fi and DSP Effect editing.",
-    ).pack(anchor=tk.W, pady=(0, 4))
+        device_name=host.state.config.get("device", "Boss Dr. Sample SP-303"),
+    )
     dialog_context = ttk.Label(frame, text="Card Setup: Not loaded | Pending pad changes: 0")
     dialog_context.pack(anchor=tk.W, pady=(0, 8))
 

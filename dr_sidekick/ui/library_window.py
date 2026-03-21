@@ -16,6 +16,7 @@ from typing import Callable, Dict, List, Optional, Tuple, TYPE_CHECKING
 from dr_sidekick import APP_VERSION
 from dr_sidekick.engine import PROJECT_ROOT, SMPINFO, SP303_PADS, VirtualCard
 from dr_sidekick.engine.packs import discover_packs
+from dr_sidekick.ui.branding import create_brand_header
 from dr_sidekick.ui.dialogs import show_text_dialog
 
 if TYPE_CHECKING:
@@ -659,15 +660,15 @@ A: Quick Import does not alter the audio level of your WAV files. If samples
         frame.pack(fill=tk.BOTH, expand=True)
 
         # ── Branding header ─────────────────────────────────────────────────
-        header_frame = ttk.Frame(frame)
-        header_frame.pack(fill=tk.X, pady=(0, 6))
-        ttk.Label(header_frame, text="Dr. Sidekick", font=("Courier", 18, "bold")).pack(side=tk.LEFT)
-        ttk.Label(header_frame, text="Pattern Sequencer and SmartMedia librarian for the Boss Dr. Sample SP-303",
-                  font=("Courier", 9)).pack(side=tk.LEFT, padx=(12, 0), anchor=tk.S, pady=(0, 3))
-        ttk.Button(header_frame, text="Open Pattern Sequencer",
-                   command=self.open_pattern_sequencer).pack(side=tk.RIGHT)
-        ttk.Button(header_frame, text="Open Sample Manager",
-                   command=self.open_sample_manager).pack(side=tk.RIGHT, padx=(0, 6))
+        device_name = self.state.config.get("device", "Boss Dr. Sample SP-303")
+        create_brand_header(
+            frame,
+            device_name=device_name,
+            actions=[
+                ("Open Sample Manager", self.open_sample_manager),
+                ("Open Pattern Sequencer", self.open_pattern_sequencer),
+            ],
+        )
 
         # ── Top status bar ──────────────────────────────────────────────────
         top_bar = ttk.Frame(frame)
