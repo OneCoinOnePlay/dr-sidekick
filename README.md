@@ -4,7 +4,7 @@
 
 ![Beta](https://img.shields.io/badge/status-beta-orange)
 ![Python 3](https://img.shields.io/badge/python-3.x-blue)
-![macOS](https://img.shields.io/badge/platform-macOS-lightgrey)
+![Platforms](https://img.shields.io/badge/platform-macOS%20%7C%20Windows-lightgrey)
 
 ---
 
@@ -53,12 +53,30 @@
 
 - Python 3.9 or later
 - Tkinter (included with most Python distributions)
-- macOS (primary target; Linux/Windows untested)
+- macOS and Windows validated
 - `PTNDATA_INIT_OFFICIAL.bin` alongside `Dr_Sidekick.py` (included in this repo) — a byte-perfect initialization template captured from real SP-303 hardware. Without it the app falls back to a software-generated template that may not produce fully hardware-compatible files.
 
 Optional: `tkinterdnd2` enables drag-and-drop support. The app runs without it.
 
+If you want drag-and-drop support on Windows PowerShell:
+
+```powershell
+py -3 -m pip install tkinterdnd2
+```
+
 ## Run
+
+```bash
+python Dr_Sidekick.py
+```
+
+On Windows PowerShell, you can also use:
+
+```powershell
+py -3 Dr_Sidekick.py
+```
+
+On systems where `python` does not point to Python 3, use:
 
 ```bash
 python3 Dr_Sidekick.py
