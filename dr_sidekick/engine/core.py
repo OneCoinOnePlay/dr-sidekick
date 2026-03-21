@@ -1162,49 +1162,68 @@ def _sp303_interp8(d0, out):
     out[12] += _sp303_interp(out[11], out[13]); out[14] += _sp303_interp(out[13], out[15])
 
 
+# Per-pattern fixed shift amounts and dispatch table.
+# pattern → (pat_str, shift, interp_func)
+# None entries → output zeros.  Shift from C reference SHIFT_ROUND_N per case.
+_SP303_MT1_DISPATCH = {
+    0:  None, 1: None,                                          # ZERO
+    2:  (_SP303_PAT_B,  0, _sp303_interp2),
+    3:  (_SP303_PAT_B,  1, _sp303_interp2),
+    4:  (_SP303_PAT_B,  2, _sp303_interp2),
+    5:  (_SP303_PAT_B,  3, _sp303_interp2),
+    6:  (_SP303_PAT_D,  2, _sp303_interp4),
+    7:  (_SP303_PAT_D,  3, _sp303_interp4),
+    8:  (_SP303_PAT_D,  4, _sp303_interp4),
+    9:  (_SP303_PAT_D,  5, _sp303_interp4),
+    10: (_SP303_PAT_D,  6, _sp303_interp4),
+    11: (_SP303_PAT_D,  7, _sp303_interp4),
+    12: None, 13: None, 14: None,                               # ZERO
+    15: (_SP303_PAT_A,  0, _sp303_interp2),
+    16: (_SP303_PAT_A,  1, _sp303_interp2),
+    17: (_SP303_PAT_A,  2, _sp303_interp2),
+    18: (_SP303_PAT_B3, 4, _sp303_interp2),
+    19: (_SP303_PAT_C,  0, _sp303_interp2),
+    20: (_SP303_PAT_C,  1, _sp303_interp2),
+    21: (_SP303_PAT_C,  2, _sp303_interp2),
+    22: (_SP303_PAT_C,  3, _sp303_interp2),
+    23: (_SP303_PAT_C,  4, _sp303_interp2),
+    24: (_SP303_PAT_C,  5, _sp303_interp2),
+    25: (_SP303_PAT_F,  4, _sp303_interp8),
+    26: (_SP303_PAT_F,  5, _sp303_interp8),
+    27: (_SP303_PAT_F,  6, _sp303_interp8),
+    28: (_SP303_PAT_F,  7, _sp303_interp8),
+    29: (_SP303_PAT_F,  8, _sp303_interp8),
+    30: (_SP303_PAT_F,  8, None),                               # DOUBLE_ODDS
+    31: (_SP303_PAT_E,  6, _sp303_interp4),
+    32: None, 33: None, 34: None, 35: None, 36: None,          # ZERO
+}
+
+
 def _sp303_decode_mt1(d0: int, block: bytes) -> List[int]:
-    """Decode one 16-byte MT1 RDAC block to high-precision (24-bit internal) samples."""
+    """Decode one 16-byte MT1 block to 16 signed 16-bit samples."""
     p = _SP303_RDAC_PATTERNS[(block[0] & 0xf0) | ((block[2] & 0xf0) >> 4)]
-    lut_val = _SP303_FW_SHIFT_LUT64[block[0] >> 2]
-    
-    pat_map = {
-        0:  (_SP303_PAT_B,  _sp303_interp2), 1:  (_SP303_PAT_B,  _sp303_interp2),
-        2:  (_SP303_PAT_B,  _sp303_interp2), 3:  (_SP303_PAT_B,  _sp303_interp2),
-        4:  (_SP303_PAT_B,  _sp303_interp2), 5:  (_SP303_PAT_B,  _sp303_interp2),
-        6:  (_SP303_PAT_D,  _sp303_interp4), 7:  (_SP303_PAT_D,  _sp303_interp4),
-        8:  (_SP303_PAT_D,  _sp303_interp4), 9:  (_SP303_PAT_D,  _sp303_interp4),
-        10: (_SP303_PAT_D,  _sp303_interp4), 11: (_SP303_PAT_D,  _sp303_interp4),
-        12: (_SP303_PAT_A,  _sp303_interp2), 13: (_SP303_PAT_A,  _sp303_interp2),
-        14: (_SP303_PAT_A,  _sp303_interp2), 15: (_SP303_PAT_A,  _sp303_interp2),
-        16: (_SP303_PAT_A,  _sp303_interp2), 17: (_SP303_PAT_A,  _sp303_interp2),
-        18: (_SP303_PAT_B3, _sp303_interp2),
-        19: (_SP303_PAT_C,  _sp303_interp2), 20: (_SP303_PAT_C,  _sp303_interp2),
-        21: (_SP303_PAT_C,  _sp303_interp2), 22: (_SP303_PAT_C,  _sp303_interp2),
-        23: (_SP303_PAT_C,  _sp303_interp2), 24: (_SP303_PAT_C,  _sp303_interp2),
-        25: (_SP303_PAT_F,  _sp303_interp8), 26: (_SP303_PAT_F,  _sp303_interp8),
-        27: (_SP303_PAT_F,  _sp303_interp8), 28: (_SP303_PAT_F,  _sp303_interp8),
-        29: (_SP303_PAT_F,  _sp303_interp8),
-        30: (_SP303_PAT_F,  None),
-        31: (_SP303_PAT_E,  _sp303_interp4),
-        32: (_SP303_PAT_B4, _sp303_interp2), 33: (_SP303_PAT_B4, _sp303_interp2),
-        34: (_SP303_PAT_B4, _sp303_interp2), 35: (_SP303_PAT_B4, _sp303_interp2),
-        36: (_SP303_PAT_B4, _sp303_interp2)
-    }
-    
-    if p not in pat_map:
+    entry = _SP303_MT1_DISPATCH.get(p)
+    if entry is None:
         return [0] * 16
-        
-    pat_str, interp_func = pat_map[p]
-    out, max_depth = _sp303_apply_pattern(block, pat_str)
-    
-    # Ensure max_depth is at least 1 to avoid division by zero/weird shifts
-    max_depth = max(1, max_depth)
-    shift = (23 - max_depth) - lut_val
+
+    pat_str, shift, interp_func = entry
+    out, _max_depth = _sp303_apply_pattern(block, pat_str)
+
+    # Fixed per-pattern shift (NOT computed from firmware LUT)
     _sp303_shift_round(out, shift)
+
     if interp_func:
         interp_func(d0, out)
     elif p == 30:
-        for i in range(0, 16, 2): out[i] <<= 1
+        for i in range(0, 16, 2):
+            out[i] <<= 1
+
+    # Clamp to 16-bit signed range
+    for i in range(16):
+        if out[i] < -32768:
+            out[i] = -32768
+        elif out[i] > 32767:
+            out[i] = 32767
     return out
 
 
@@ -1215,16 +1234,15 @@ def sp303_decode_sp0(path: str) -> List[int]:
     """Decode an SP0 file to a flat list of 16-bit PCM samples (31250 Hz native)."""
     file_size = os.path.getsize(path)
     samples: List[int] = []
-    d0 = 0  # 24-bit internal predictor
+    d0 = 0  # 16-bit predictor (last sample of previous block)
     with open(path, 'rb') as f:
         for _ in range(file_size // 16):
             block = f.read(16)
             if len(block) < 16:
                 break
             chunk = _sp303_decode_mt1(d0, block)
-            chunk_16 = [max(-32768, min(32767, s >> 8)) for s in chunk]
-            samples.extend(chunk_16)
-            d0 = max(-8388608, min(8388607, chunk[15]))  # Clamp to 24-bit signed range
+            samples.extend(chunk)
+            d0 = chunk[15]
     return samples
 
 
@@ -2250,7 +2268,7 @@ DEFAULT_PATTERN_LENGTH_BARS = 4  # Default pattern length
 MAX_PATTERN_LENGTH_BARS = 99  # SP-303 hardware maximum
 TUPLE_ZONE_MAX_BYTES = 0x272 - 0x70  # PTNDATA event payload capacity per pattern slot
 TUPLE_ZONE_SENTINEL_BYTES = 6  # Reserve one fill/end tuple so decoding stops inside the tuple zone.
-APP_VERSION = "0.7.0"
+APP_VERSION = "0.7.2"
 
 
 def load_midi_notes_by_channel(midi_path: str) -> Tuple[Dict[int, List[Tuple[int, int, int]]], int]:
