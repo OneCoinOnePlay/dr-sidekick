@@ -1208,8 +1208,11 @@ def _sp303_decode_mt1(d0: int, block: bytes) -> List[int]:
     return out
 
 
+SP303_SAMPLE_RATE = 31250  # 20 MHz master clock / 640 divider
+
+
 def sp303_decode_sp0(path: str) -> List[int]:
-    """Decode an SP0 file to a flat list of 16-bit PCM samples (32000 Hz native)."""
+    """Decode an SP0 file to a flat list of 16-bit PCM samples (31250 Hz native)."""
     file_size = os.path.getsize(path)
     samples: List[int] = []
     d0 = 0  # 24-bit internal predictor
@@ -1221,7 +1224,7 @@ def sp303_decode_sp0(path: str) -> List[int]:
             chunk = _sp303_decode_mt1(d0, block)
             chunk_16 = [max(-32768, min(32767, s >> 8)) for s in chunk]
             samples.extend(chunk_16)
-            d0 = chunk[15]  # Preserve high-precision predictor
+            d0 = max(-8388608, min(8388607, chunk[15]))  # Clamp to 24-bit signed range
     return samples
 
 
