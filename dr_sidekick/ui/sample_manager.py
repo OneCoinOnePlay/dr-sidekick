@@ -34,6 +34,11 @@ from dr_sidekick.ui.branding import create_brand_header
 from dr_sidekick.ui.dialogs import show_text_dialog
 
 try:
+    import winsound
+except ImportError:
+    winsound = None
+
+try:
     from tkinterdnd2 import DND_FILES
 
     TKDND_AVAILABLE = True
@@ -823,6 +828,11 @@ def open_sample_manager(host: SampleManagerHost, smpinfo_path: Optional[Path] = 
         proc, tmp_path = playback[0], playback[1]
         playback[0] = None
         playback[1] = None
+        if sys.platform == "win32" and winsound is not None:
+            try:
+                winsound.PlaySound(None, 0)
+            except Exception:
+                pass
         if proc is not None:
             try:
                 proc.terminate()
@@ -835,6 +845,17 @@ def open_sample_manager(host: SampleManagerHost, smpinfo_path: Optional[Path] = 
                 pass
 
     def launch_playback(file_path: str, tmp_path: Optional[str] = None) -> None:
+        if sys.platform == "win32":
+            if winsound is None:
+                messagebox.showinfo("Preview", "Audio preview is not available on this Windows setup.", parent=dialog)
+                return
+            try:
+                winsound.PlaySound(file_path, winsound.SND_ASYNC | winsound.SND_FILENAME)
+            except Exception as exc:
+                messagebox.showerror("Preview", str(exc), parent=dialog)
+                return
+            playback[1] = tmp_path
+            return
         if sys.platform == "darwin":
             cmd = ["afplay", file_path]
         elif sys.platform.startswith("linux"):
@@ -888,17 +909,21 @@ def open_sample_manager(host: SampleManagerHost, smpinfo_path: Optional[Path] = 
         if source.source_type == SourceType.EMPTY or source.source_path is None:
             messagebox.showinfo("Preview", "No sample assigned to this pad.", parent=dialog)
             return
+        if source.source_type != SourceType.ARCHIVED_SP0:
+            messagebox.showinfo(
+                "Preview",
+                "Preview is only available for archived SMP*.SP0 samples.",
+                parent=dialog,
+            )
+            return
         stop_playback()
         try:
-            if source.source_type == SourceType.ARCHIVED_SP0:
-                pcm, n_samples, channels = decode_sp0_to_pcm(source.source_path, source.is_stereo)
-                fd, tmp_path = tempfile.mkstemp(suffix=".wav")
-                with os.fdopen(fd, "wb") as wav_file:
-                    sp303_write_wav(wav_file, n_samples, SP303_SAMPLE_RATE, channels)
-                    wav_file.write(struct.pack(f"<{len(pcm)}h", *pcm))
-                launch_playback(tmp_path, tmp_path)
-            else:
-                launch_playback(str(source.source_path))
+            pcm, n_samples, channels = decode_sp0_to_pcm(source.source_path, source.is_stereo)
+            fd, tmp_path = tempfile.mkstemp(suffix=".wav")
+            with os.fdopen(fd, "wb") as wav_file:
+                sp303_write_wav(wav_file, n_samples, SP303_SAMPLE_RATE, channels)
+                wav_file.write(struct.pack(f"<{len(pcm)}h", *pcm))
+            launch_playback(tmp_path, tmp_path)
         except Exception as exc:
             messagebox.showerror("Preview", str(exc), parent=dialog)
 
@@ -923,11 +948,17 @@ def open_sample_manager(host: SampleManagerHost, smpinfo_path: Optional[Path] = 
             if left_path.name.upper().endswith("L.SP0"):
                 right_path = left_path.with_name(left_path.name[:-5] + "R.SP0")
                 is_stereo = right_path.exists()
-        stem = left_path.stem[:-1] if left_path.stem.upper().endswith("L") else left_path.stem
+        # SP-303 naming: SMP0000L.SP0 → SMPL0001.WAV (index + 1)
+        raw_stem = left_path.stem[:-1] if left_path.stem.upper().endswith("L") else left_path.stem
+        upper_stem = raw_stem.upper()
+        if upper_stem.startswith("SMP") and upper_stem[3:].isdigit():
+            wav_stem = f"SMPL{int(upper_stem[3:]) + 1:04d}"
+        else:
+            wav_stem = raw_stem
         out_file = filedialog.asksaveasfilename(
             parent=dialog,
             title="Save WAV As",
-            initialfile=stem + ".wav",
+            initialfile=wav_stem + ".WAV",
             defaultextension=".wav",
             filetypes=[("WAV Files", "*.wav"), ("All Files", "*.*")],
         )
