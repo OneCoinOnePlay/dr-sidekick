@@ -44,7 +44,9 @@ class PianoRollCanvas(tk.Canvas):
         self.selection_rect_start: Optional[Tuple[int, int]] = None
         self.edit_mode = "Draw"  # Draw, Select, Erase
         self.on_view_changed = None
+        self.on_modified = None
         self.selected_pad_row: Optional[int] = None
+        self._drag_modified = False
 
         # Bind mouse events
         self.bind("<Button-1>", self.on_mouse_down)
@@ -461,10 +463,16 @@ class PianoRollCanvas(tk.Canvas):
                     return event
         return None
 
+    def _notify_modified(self):
+        """Notify the parent window after a model mutation."""
+        if callable(self.on_modified):
+            self.on_modified()
+
     def on_mouse_down(self, event):
         """Handle mouse down"""
         self.focus_set()
         self.selected_pad_row = None
+        self._drag_modified = False
         # Find event at position
         clicked_event = self.find_event_at(event.x, event.y)
 
@@ -482,6 +490,7 @@ class PianoRollCanvas(tk.Canvas):
                 pad = self.y_to_pad(event.y)
                 self.model.add_event(tick, pad)
                 self.redraw()
+                self._notify_modified()
 
         elif self.edit_mode == "Select":
             if clicked_event:
@@ -504,6 +513,7 @@ class PianoRollCanvas(tk.Canvas):
                 if clicked_event in self.selected_events:
                     self.selected_events.remove(clicked_event)
                 self.redraw()
+                self._notify_modified()
 
     def on_mouse_drag(self, event):
         """Handle mouse drag"""
@@ -511,8 +521,11 @@ class PianoRollCanvas(tk.Canvas):
             # Move event
             new_tick = self.x_to_tick(event.x)
             new_pad = self.y_to_pad(event.y)
+            if new_tick == self.dragging_event.tick and new_pad == self.dragging_event.pad:
+                return
             self.selected_pad_row = None
             self.model.move_event(self.dragging_event, new_tick, new_pad)
+            self._drag_modified = True
             self.redraw()
 
         elif self.edit_mode == "Select" and self.selection_rect_start:
@@ -546,8 +559,12 @@ class PianoRollCanvas(tk.Canvas):
             self.selected_pad_row = None
             self.redraw()
 
+        if self._drag_modified:
+            self._notify_modified()
+
         self.dragging_event = None
         self.drag_start_pos = None
+        self._drag_modified = False
 
     def on_mouse_move(self, event):
         """Handle mouse move (for cursor changes)"""
@@ -559,6 +576,7 @@ class PianoRollCanvas(tk.Canvas):
             self.model.remove_events(list(self.selected_events))
             self.selected_events.clear()
             self.redraw()
+            self._notify_modified()
 
     def on_velocity_decrease(self, event):
         """Decrease velocity of selected events"""
@@ -568,6 +586,7 @@ class PianoRollCanvas(tk.Canvas):
                 evt.velocity = max(0, min(127, evt.velocity - 10))
             self.model.dirty = True
             self.redraw()
+            self._notify_modified()
             return "break"
 
     def on_velocity_increase(self, event):
@@ -578,6 +597,7 @@ class PianoRollCanvas(tk.Canvas):
                 evt.velocity = max(0, min(127, evt.velocity + 10))
             self.model.dirty = True
             self.redraw()
+            self._notify_modified()
             return "break"
 
     def on_right_click(self, event):
@@ -588,3 +608,4 @@ class PianoRollCanvas(tk.Canvas):
             if clicked_event in self.selected_events:
                 self.selected_events.remove(clicked_event)
             self.redraw()
+            self._notify_modified()
