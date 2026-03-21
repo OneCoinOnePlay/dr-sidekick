@@ -32,6 +32,7 @@ from dr_sidekick.ui.constants import (
     PAD_NAMES,
     PAD_ORDER,
 )
+from dr_sidekick.ui.branding import create_brand_header
 from dr_sidekick.ui.dialogs import show_text_dialog
 from dr_sidekick.ui.piano_roll import PianoRollCanvas
 
@@ -52,6 +53,7 @@ class PatternSequencerWindow:
         self.root.title("Dr. Sidekick — Pattern Sequencer")
         self.root.configure(bg="#000000")
         self.root.protocol("WM_DELETE_WINDOW", self.on_hide)
+        self.style = ttk.Style()
 
         # Calculate window height: toolbar (~40) + ruler (25) + 32 lanes + statusbar (~25) + padding
         window_height = 40 + 25 + (32 * 25) + 25 + 30  # ~920 pixels
@@ -72,7 +74,7 @@ class PatternSequencerWindow:
 
         # Build UI
         self._create_menu()
-        self._create_toolbar()
+        self._create_top_bar()
         self._create_main_area()
         self._create_status_bar()
 
@@ -118,6 +120,17 @@ class PatternSequencerWindow:
         self.lib_win.root.lift()
 
     # ── Menu / toolbar / UI ──────────────────────────────────────────────
+
+    def _create_top_bar(self):
+        """Create a single-row branding + toolbar strip."""
+        top_bar = ttk.Frame(self.root)
+        top_bar.pack(side=tk.TOP, fill=tk.X, padx=5, pady=5)
+        create_brand_header(
+            top_bar,
+            device_name=self.state.config.get("device", "Boss Dr. Sample SP-303"),
+            pack=False,
+        ).pack(side=tk.LEFT)
+        self._create_toolbar(parent=top_bar)
 
     def _create_menu(self):
         """Create menu bar"""
@@ -469,10 +482,14 @@ existing ones.
             anchor="w",
         ).pack(anchor=tk.W)
 
-    def _create_toolbar(self):
+    def _create_toolbar(self, parent=None):
         """Create toolbar"""
-        toolbar = ttk.Frame(self.root)
-        toolbar.pack(side=tk.TOP, fill=tk.X, padx=5, pady=5)
+        toolbar_parent = parent if parent is not None else self.root
+        toolbar = ttk.Frame(toolbar_parent)
+        if parent is None:
+            toolbar.pack(side=tk.TOP, fill=tk.X, padx=5, pady=5)
+        else:
+            toolbar.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(16, 0))
         dropdown_width = 4
 
         # Slot selector with bank labels
@@ -591,6 +608,7 @@ existing ones.
         )
         self.canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         self.canvas.on_view_changed = self.update_lane_labels
+        self.canvas.on_modified = self.on_canvas_modified
 
         # Configure scrollbars
         h_scrollbar.config(command=self.canvas.xview)
@@ -607,6 +625,23 @@ existing ones.
         status_frame = tk.Frame(self.root, bg="#000000")
         status_frame.pack(side=tk.BOTTOM, fill=tk.X)
 
+        self.style.configure(
+            "Capacity.Horizontal.TProgressbar",
+            troughcolor="#111111",
+            background="#4caf50",
+            bordercolor="#111111",
+            lightcolor="#4caf50",
+            darkcolor="#4caf50",
+        )
+        self.style.configure(
+            "CapacityWarning.Horizontal.TProgressbar",
+            troughcolor="#111111",
+            background="#cc3333",
+            bordercolor="#111111",
+            lightcolor="#cc3333",
+            darkcolor="#cc3333",
+        )
+
         self.status_bar = ttk.Label(
             status_frame,
             text="Ready",
@@ -615,12 +650,42 @@ existing ones.
         )
         self.status_bar.pack(side=tk.LEFT, fill=tk.X, expand=True)
 
-        ttk.Label(
+        self.capacity_value_label = ttk.Label(
             status_frame,
-            text=self.state.config.get("device", "BOSS Dr. Sample SP-303"),
+            text="0% | 0/112 events | 0/508 bytes",
+            font=("", 10),
+            width=31,
             relief=tk.SUNKEN,
-            anchor=tk.E,
-        ).pack(side=tk.RIGHT)
+            anchor="e",
+            justify=tk.RIGHT,
+        )
+        self.capacity_value_label.pack(side=tk.RIGHT)
+
+        self.capacity_bar_frame = ttk.Label(
+            status_frame,
+            relief=tk.SUNKEN,
+            anchor=tk.CENTER,
+        )
+        self.capacity_bar_frame.pack(side=tk.RIGHT)
+
+        self.capacity_bar = ttk.Progressbar(
+            self.capacity_bar_frame,
+            style="Capacity.Horizontal.TProgressbar",
+            orient=tk.HORIZONTAL,
+            mode="determinate",
+            length=150,
+            maximum=100,
+        )
+        self.capacity_bar.pack(padx=4, pady=1)
+
+        self.capacity_label = ttk.Label(
+            status_frame,
+            text="CAPACITY",
+            font=("", 10),
+            relief=tk.SUNKEN,
+            anchor=tk.CENTER,
+        )
+        self.capacity_label.pack(side=tk.RIGHT)
 
     def set_active_workflow(self, workflow: str):
         self.active_workflow = workflow
@@ -642,6 +707,40 @@ existing ones.
     def update_status(self, message: str):
         """Update status bar"""
         self.status_bar.config(text=message)
+        self.update_capacity_indicator()
+
+    def update_capacity_indicator(self):
+        """Refresh the dedicated pattern-capacity widgets without changing status text."""
+        capacity = self.model.get_capacity_status()
+        percent_text = f"{capacity['combined_percent']:.0f}%"
+        if capacity["over_capacity"]:
+            percent_text += "+"
+
+        self.capacity_bar.config(value=capacity["display_percent"])
+        self.capacity_bar.config(
+            style=(
+                "CapacityWarning.Horizontal.TProgressbar"
+                if capacity["warning"]
+                else "Capacity.Horizontal.TProgressbar"
+            )
+        )
+        self.capacity_value_label.config(
+            text=(
+                f"{percent_text} | "
+                f"{capacity['event_count']}/{capacity['event_capacity']} events | "
+                f"{capacity['bytes_used']}/{capacity['byte_capacity']} bytes"
+            ),
+        )
+
+    def on_canvas_modified(self):
+        """Refresh capacity after direct piano-roll edits."""
+        self.update_capacity_indicator()
+
+    def _sync_pattern_length_controls(self):
+        """Sync loop-length controls from the current model slot."""
+        pattern_length = self.model.get_pattern_length_bars()
+        self.pattern_length_var.set(pattern_length)
+        self.canvas.set_pattern_length(pattern_length)
 
     def update_status_with_pattern_info(self):
         """Update status bar with pattern info (per-slot)"""
@@ -675,7 +774,7 @@ existing ones.
                 f"{pads_used} pads{mapping_text}"
             )
 
-        self.status_bar.config(text=status_text)
+        self.update_status(status_text)
         self.refresh_slot_labels()
 
     def refresh_slot_labels(self):
@@ -932,6 +1031,7 @@ existing ones.
     def on_undo(self):
         """Undo last operation"""
         if self.model.undo():
+            self._sync_pattern_length_controls()
             self.canvas.selected_events.clear()
             self.canvas.selected_pad_row = None
             self.canvas.redraw()
@@ -941,6 +1041,7 @@ existing ones.
     def on_redo(self):
         """Redo last undone operation"""
         if self.model.redo():
+            self._sync_pattern_length_controls()
             self.canvas.selected_events.clear()
             self.canvas.selected_pad_row = None
             self.canvas.redraw()
@@ -1086,8 +1187,8 @@ existing ones.
         """Handle pattern length change"""
         try:
             bars = self.pattern_length_var.get()
-            self.canvas.set_pattern_length(bars)
             self.model.set_current_slot_length_bars(bars)
+            self._sync_pattern_length_controls()
             self.update_status(f"Pattern Length: {bars} bars")
         except tk.TclError:
             pass  # Invalid input, ignore

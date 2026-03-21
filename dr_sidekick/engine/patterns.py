@@ -38,6 +38,7 @@ class ModelState:
 
     slot: int
     events: List[Event]
+    ptninfo_entry: Optional[bytes] = None
 
 
 class PatternModel:
@@ -208,6 +209,43 @@ class PatternModel:
             0x04: "8-3",
         }
         return quant_map.get(b2, "Off")
+
+    def get_capacity_status(self) -> dict:
+        """Return slot capacity usage based on event count and serialized bytes."""
+        event_count = len(self.events)
+        event_capacity = MAX_PATTERN_EVENT_CAPACITY
+        byte_capacity = TUPLE_ZONE_MAX_BYTES - TUPLE_ZONE_SENTINEL_BYTES
+        loop_bars = self.get_pattern_length_bars()
+        total_length_ticks = self._total_length_ticks_for_bars(loop_bars)
+
+        bytes_used = 0
+        if self.events and self.ptndata is not None:
+            bytes_used = len(
+                self.ptndata.encode_events(
+                    self.events,
+                    total_length_ticks=total_length_ticks,
+                )
+            )
+
+        event_percent = (event_count / event_capacity) * 100 if event_capacity else 0.0
+        byte_percent = (bytes_used / byte_capacity) * 100 if byte_capacity else 0.0
+        combined_percent = max(event_percent, byte_percent)
+
+        return {
+            "event_count": event_count,
+            "event_capacity": event_capacity,
+            "events_remaining": max(0, event_capacity - event_count),
+            "event_percent": event_percent,
+            "bytes_used": bytes_used,
+            "byte_capacity": byte_capacity,
+            "bytes_remaining": max(0, byte_capacity - bytes_used),
+            "byte_percent": byte_percent,
+            "combined_percent": combined_percent,
+            "display_percent": min(100.0, combined_percent),
+            "loop_bars": loop_bars,
+            "warning": combined_percent >= 90.0,
+            "over_capacity": event_count > event_capacity or bytes_used > byte_capacity,
+        }
 
     def save_slot(self):
         """Save current events to slot."""
@@ -696,6 +734,10 @@ class PatternModel:
     def set_current_slot_length_bars(self, bars: int):
         """Update PTNINFO length byte for current slot without altering mapping."""
         bars = max(1, min(MAX_PATTERN_LENGTH_BARS, round(bars)))
+        current_bars = self.get_pattern_length_bars()
+        if bars == current_bars:
+            return
+        self.push_undo_state()
         mapping_index = self.get_mapping_index(self.current_slot)
         if mapping_index is None:
             mapping_index = self.current_slot + 1
@@ -808,11 +850,33 @@ class PatternModel:
         state = ModelState(
             slot=self.current_slot,
             events=[Event(event.tick, event.pad, event.velocity) for event in self.events],
+            ptninfo_entry=self.get_ptninfo_entry(self.current_slot),
         )
         self.undo_stack.append(state)
         if len(self.undo_stack) > self.max_undo_states:
             self.undo_stack.pop(0)
         self.redo_stack.clear()
+
+    def _restore_state(self, state: ModelState):
+        """Restore event data and current-slot PTNINFO metadata from an undo snapshot."""
+        self.events = [Event(event.tick, event.pad, event.velocity) for event in state.events]
+        if state.slot != self.current_slot or state.ptninfo_entry is None or self.ptninfo_raw is None:
+            self.dirty = True
+            return
+
+        offset = state.slot * 4
+        self.ptninfo_raw[offset:offset + 4] = state.ptninfo_entry
+        if self.ptninfo is not None:
+            self.ptninfo.slots[state.slot] = PatternSlot.from_bytes(
+                state.slot,
+                state.ptninfo_entry,
+            )
+        mapping_index = self.get_mapping_index(self.current_slot)
+        if mapping_index is not None and 1 <= mapping_index <= 16:
+            self.current_storage_slot = mapping_index - 1
+        else:
+            self.current_storage_slot = self.current_slot
+        self.dirty = True
 
     def undo(self):
         """Undo last operation."""
@@ -822,12 +886,12 @@ class PatternModel:
         current = ModelState(
             slot=self.current_slot,
             events=[Event(event.tick, event.pad, event.velocity) for event in self.events],
+            ptninfo_entry=self.get_ptninfo_entry(self.current_slot),
         )
         self.redo_stack.append(current)
 
         state = self.undo_stack.pop()
-        self.events = [Event(event.tick, event.pad, event.velocity) for event in state.events]
-        self.dirty = True
+        self._restore_state(state)
         return True
 
     def redo(self):
@@ -838,10 +902,10 @@ class PatternModel:
         current = ModelState(
             slot=self.current_slot,
             events=[Event(event.tick, event.pad, event.velocity) for event in self.events],
+            ptninfo_entry=self.get_ptninfo_entry(self.current_slot),
         )
         self.undo_stack.append(current)
 
         state = self.redo_stack.pop()
-        self.events = [Event(event.tick, event.pad, event.velocity) for event in state.events]
-        self.dirty = True
+        self._restore_state(state)
         return True
