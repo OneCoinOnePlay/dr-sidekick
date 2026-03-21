@@ -26,6 +26,7 @@ from dr_sidekick.engine import (
     find_wav_files,
     parse_mpc1000_pgm,
     quick_import,
+    SP303_SAMPLE_RATE,
     sp303_decode_sp0,
     sp303_write_wav,
 )
@@ -893,7 +894,7 @@ def open_sample_manager(host: SampleManagerHost, smpinfo_path: Optional[Path] = 
                 pcm, n_samples, channels = decode_sp0_to_pcm(source.source_path, source.is_stereo)
                 fd, tmp_path = tempfile.mkstemp(suffix=".wav")
                 with os.fdopen(fd, "wb") as wav_file:
-                    sp303_write_wav(wav_file, n_samples, 32000, channels)
+                    sp303_write_wav(wav_file, n_samples, SP303_SAMPLE_RATE, channels)
                     wav_file.write(struct.pack(f"<{len(pcm)}h", *pcm))
                 launch_playback(tmp_path, tmp_path)
             else:
@@ -935,12 +936,12 @@ def open_sample_manager(host: SampleManagerHost, smpinfo_path: Optional[Path] = 
         try:
             pcm, n_samples, channels = decode_sp0_to_pcm(left_path, is_stereo)
             with open(out_file, "wb") as wav_file:
-                sp303_write_wav(wav_file, n_samples, 32000, channels)
+                sp303_write_wav(wav_file, n_samples, SP303_SAMPLE_RATE, channels)
                 wav_file.write(struct.pack(f"<{len(pcm)}h", *pcm))
-            duration = n_samples / 32000.0
+            duration = n_samples / SP303_SAMPLE_RATE
             messagebox.showinfo(
                 "Convert SP0 to WAV",
-                f"Saved: {out_file}\n{n_samples:,} samples  {duration:.2f}s  {'Stereo' if channels == 2 else 'Mono'}  32 kHz",
+                f"Saved: {out_file}\n{n_samples:,} samples  {duration:.2f}s  {'Stereo' if channels == 2 else 'Mono'}  31.25 kHz",
                 parent=dialog,
             )
             log.info(
