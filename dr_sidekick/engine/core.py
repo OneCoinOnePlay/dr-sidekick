@@ -1038,50 +1038,108 @@ class PadMapping:
 
 
 # ── SP-303 RDAC MT1/MT2 decoder ───────────────────────────────────────────────
-# Ported from RDAC decode research by Randy Gordon (randy@integrand.com), LGPL 2006.
-# Updated 2026: Improved with Adaptive Alignment and 24-bit state tracking.
+# Derived from SP-303 firmware disassembly (SH-DSP, 2026).
+# Dispatch table at firmware 0xE000, shift LUT at 0xB4C0.
 
-# Pattern lookup table: index = (block[0] & 0xf0) | (block[2] >> 4) → 0..36
-_SP303_RDAC_PATTERNS = [
-    0, 0, 0, 0,  1, 1, 1, 1,  2, 2, 2, 2,  3, 3, 3, 3,
-    0, 0, 0, 0,  1, 1, 1, 1,  2, 2, 2, 2,  3, 3, 3, 3,
-    0, 0, 0, 0,  1, 1, 1, 1,  2, 2, 2, 2,  3, 3, 3, 3,
-    0, 0, 0, 0,  1, 1, 1, 1,  2, 2, 2, 2,  3, 3, 3, 3,
-    4, 4, 4, 4,  5, 5, 5, 5,  6, 6, 6, 6,  7, 7, 7, 7,
-    4, 4, 4, 4,  5, 5, 5, 5,  6, 6, 6, 6,  7, 7, 7, 7,
-    4, 4, 4, 4,  5, 5, 5, 5,  6, 6, 6, 6,  7, 7, 7, 7,
-    4, 4, 4, 4,  5, 5, 5, 5,  6, 6, 6, 6,  7, 7, 7, 7,
-    8,  8,  8,  8,  9,  9,  9,  9,  10, 10, 10, 10, 11, 11, 11, 11,
-    8,  8,  8,  8,  9,  9,  9,  9,  10, 10, 10, 10, 11, 11, 11, 11,
-    8,  8,  8,  8,  9,  9,  9,  9,  10, 10, 10, 10, 11, 11, 11, 11,
-    8,  8,  8,  8,  9,  9,  9,  9,  10, 10, 10, 10, 11, 11, 11, 11,
-    12, 12, 13, 13, 14, 14, 15, 15, 16, 16, 17, 17, 18, 18, 19, 19,
-    12, 12, 13, 13, 14, 14, 15, 15, 16, 16, 17, 17, 18, 18, 19, 19,
-    20, 20, 21, 21, 22, 22, 23, 23, 24, 24, 25, 26, 27, 28, 29, 30,
-    20, 20, 21, 21, 22, 22, 23, 23, 24, 24, 31, 32, 33, 34, 35, 36,
+# Firmware dispatch table: 256 entries indexed by (block[0] & 0xF0) | (block[2] >> 4)
+# Each entry: (fmt_id, sub_op, anchor_flag)
+#   fmt_id: format identifier controlling interp function and bit width
+#   sub_op: sub-operation selector (microkernel dispatch, not yet implemented)
+#   anchor_flag: 0x00 = no anchor, non-zero = block carries a 16-bit anchor at sample[15]
+_SP303_FW_DISPATCH = [
+    # Generated from firmware 0xE000 dispatch table
+    # Row 0x0_: block[0] top nibble = 0x0
+    (0x00, 0, 0x00), (0x00, 0, 0x00), (0x00, 0, 0x00), (0x00, 0, 0x00),
+    (0x00, 0, 0x00), (0x00, 0, 0x00), (0x00, 0, 0x00), (0x00, 0, 0x00),
+    (0x00, 0, 0x00), (0x00, 0, 0x00), (0x00, 0, 0x00), (0x00, 0, 0x00),
+    (0x00, 0, 0x00), (0x00, 0, 0x00), (0x00, 0, 0x00), (0x00, 0, 0x00),
+    # Row 0x1_
+    (0x00, 0, 0x00), (0x00, 0, 0x00), (0x00, 0, 0x00), (0x00, 0, 0x00),
+    (0x00, 0, 0x00), (0x00, 0, 0x00), (0x00, 0, 0x00), (0x00, 0, 0x00),
+    (0x00, 0, 0x00), (0x00, 0, 0x00), (0x00, 0, 0x00), (0x00, 0, 0x00),
+    (0x00, 0, 0x00), (0x00, 0, 0x00), (0x00, 0, 0x00), (0x00, 0, 0x00),
+    # Row 0x2_
+    (0x08, 0, 0x00), (0x08, 0, 0x00), (0x08, 0, 0x00), (0x08, 0, 0x00),
+    (0x08, 1, 0x00), (0x08, 1, 0x00), (0x08, 1, 0x00), (0x08, 1, 0x00),
+    (0x08, 2, 0x00), (0x08, 2, 0x00), (0x08, 2, 0x00), (0x08, 2, 0x00),
+    (0x08, 3, 0x00), (0x08, 3, 0x00), (0x08, 3, 0x00), (0x08, 3, 0x00),
+    # Row 0x3_
+    (0x08, 0, 0x00), (0x08, 0, 0x00), (0x08, 0, 0x00), (0x08, 0, 0x00),
+    (0x08, 1, 0x00), (0x08, 1, 0x00), (0x08, 1, 0x00), (0x08, 1, 0x00),
+    (0x08, 2, 0x00), (0x08, 2, 0x00), (0x08, 2, 0x00), (0x08, 2, 0x00),
+    (0x08, 3, 0x00), (0x08, 3, 0x00), (0x08, 3, 0x00), (0x08, 3, 0x00),
+    # Row 0x4_
+    (0x09, 0, 0x00), (0x09, 0, 0x00), (0x09, 0, 0x00), (0x09, 0, 0x00),
+    (0x09, 1, 0x00), (0x09, 1, 0x00), (0x09, 1, 0x00), (0x09, 1, 0x00),
+    (0x09, 2, 0x00), (0x09, 2, 0x00), (0x09, 2, 0x00), (0x09, 2, 0x00),
+    (0x09, 3, 0x00), (0x09, 3, 0x00), (0x09, 3, 0x00), (0x09, 3, 0x00),
+    # Row 0x5_
+    (0x09, 0, 0x00), (0x09, 0, 0x00), (0x09, 0, 0x00), (0x09, 0, 0x00),
+    (0x09, 1, 0x00), (0x09, 1, 0x00), (0x09, 1, 0x00), (0x09, 1, 0x00),
+    (0x09, 2, 0x00), (0x09, 2, 0x00), (0x09, 2, 0x00), (0x09, 2, 0x00),
+    (0x09, 3, 0x00), (0x09, 3, 0x00), (0x09, 3, 0x00), (0x09, 3, 0x00),
+    # Row 0x6_
+    (0x09, 0, 0x00), (0x09, 0, 0x00), (0x09, 0, 0x00), (0x09, 0, 0x00),
+    (0x09, 1, 0x00), (0x09, 1, 0x00), (0x09, 1, 0x00), (0x09, 1, 0x00),
+    (0x09, 2, 0x00), (0x09, 2, 0x00), (0x09, 2, 0x00), (0x09, 2, 0x00),
+    (0x09, 3, 0x00), (0x09, 3, 0x00), (0x09, 3, 0x00), (0x09, 3, 0x00),
+    # Row 0x7_
+    (0x09, 0, 0x00), (0x09, 0, 0x00), (0x09, 0, 0x00), (0x09, 0, 0x00),
+    (0x09, 1, 0x00), (0x09, 1, 0x00), (0x09, 1, 0x00), (0x09, 1, 0x00),
+    (0x09, 2, 0x00), (0x09, 2, 0x00), (0x09, 2, 0x00), (0x09, 2, 0x00),
+    (0x09, 3, 0x00), (0x09, 3, 0x00), (0x09, 3, 0x00), (0x09, 3, 0x00),
+    # Row 0x8_
+    (0x0A, 0, 0x01), (0x0A, 0, 0x01), (0x0A, 0, 0x01), (0x0A, 0, 0x01),
+    (0x0A, 1, 0x01), (0x0A, 1, 0x01), (0x0A, 1, 0x01), (0x0A, 1, 0x01),
+    (0x0A, 2, 0x01), (0x0A, 2, 0x01), (0x0A, 2, 0x01), (0x0A, 2, 0x01),
+    (0x0A, 3, 0x01), (0x0A, 3, 0x01), (0x0A, 3, 0x01), (0x0A, 3, 0x01),
+    # Row 0x9_
+    (0x0A, 0, 0x01), (0x0A, 0, 0x01), (0x0A, 0, 0x01), (0x0A, 0, 0x01),
+    (0x0A, 1, 0x01), (0x0A, 1, 0x01), (0x0A, 1, 0x01), (0x0A, 1, 0x01),
+    (0x0A, 2, 0x01), (0x0A, 2, 0x01), (0x0A, 2, 0x01), (0x0A, 2, 0x01),
+    (0x0A, 3, 0x01), (0x0A, 3, 0x01), (0x0A, 3, 0x01), (0x0A, 3, 0x01),
+    # Row 0xA_
+    (0x0A, 0, 0x01), (0x0A, 0, 0x01), (0x0A, 0, 0x01), (0x0A, 0, 0x01),
+    (0x0A, 1, 0x01), (0x0A, 1, 0x01), (0x0A, 1, 0x01), (0x0A, 1, 0x01),
+    (0x0A, 2, 0x01), (0x0A, 2, 0x01), (0x0A, 2, 0x01), (0x0A, 2, 0x01),
+    (0x0A, 3, 0x01), (0x0A, 3, 0x01), (0x0A, 3, 0x01), (0x0A, 3, 0x01),
+    # Row 0xB_
+    (0x0A, 0, 0x01), (0x0A, 0, 0x01), (0x0A, 0, 0x01), (0x0A, 0, 0x01),
+    (0x0A, 1, 0x01), (0x0A, 1, 0x01), (0x0A, 1, 0x01), (0x0A, 1, 0x01),
+    (0x0A, 2, 0x01), (0x0A, 2, 0x01), (0x0A, 2, 0x01), (0x0A, 2, 0x01),
+    (0x0A, 3, 0x01), (0x0A, 3, 0x01), (0x0A, 3, 0x01), (0x0A, 3, 0x01),
+    # Row 0xC_
+    (0x0B, 0, 0x01), (0x0B, 0, 0x01), (0x0B, 1, 0x01), (0x0B, 1, 0x01),
+    (0x0B, 2, 0x01), (0x0B, 2, 0x01), (0x0B, 3, 0x01), (0x0B, 3, 0x01),
+    (0x0B, 4, 0x01), (0x0B, 4, 0x01), (0x0B, 5, 0x01), (0x0B, 5, 0x01),
+    (0x0B, 6, 0x01), (0x0B, 6, 0x01), (0x0B, 7, 0x01), (0x0B, 7, 0x01),
+    # Row 0xD_
+    (0x0B, 0, 0x01), (0x0B, 0, 0x01), (0x0B, 1, 0x01), (0x0B, 1, 0x01),
+    (0x0B, 2, 0x01), (0x0B, 2, 0x01), (0x0B, 3, 0x01), (0x0B, 3, 0x01),
+    (0x0B, 4, 0x01), (0x0B, 4, 0x01), (0x0B, 5, 0x01), (0x0B, 5, 0x01),
+    (0x0B, 6, 0x01), (0x0B, 6, 0x01), (0x0B, 7, 0x01), (0x0B, 7, 0x01),
+    # Row 0xE_
+    (0x0C, 0, 0x01), (0x0C, 0, 0x01), (0x0C, 1, 0x01), (0x0C, 1, 0x01),
+    (0x0C, 2, 0x01), (0x0C, 2, 0x01), (0x0C, 3, 0x01), (0x0C, 3, 0x01),
+    (0x0C, 4, 0x01), (0x0C, 4, 0x01), (0x0C, 5, 0x01), (0x0C, 6, 0x01),
+    (0x0C, 7, 0x01), (0x0C, 8, 0x01), (0x0C, 9, 0x01), (0x0C, 10, 0x01),
+    # Row 0xF_
+    (0x0C, 0, 0x01), (0x0C, 0, 0x01), (0x0C, 1, 0x01), (0x0C, 1, 0x01),
+    (0x0C, 2, 0x01), (0x0C, 2, 0x01), (0x0C, 3, 0x01), (0x0C, 3, 0x01),
+    (0x0C, 4, 0x01), (0x0C, 4, 0x01), (0x0C, 11, 0x01), (0x0C, 12, 0x01),
+    (0x0C, 13, 0x01), (0x0C, 14, 0x01), (0x0C, 15, 0x01), (0x0C, 16, 0x01),
 ]
 
-def _sp303_p(s): return s.replace(' ', '')
-# MT1 Patterns (16-byte blocks)
-_SP303_PAT_A  = _sp303_p("ppp88888 88888888 pppggggg gggggggg 87777776 66666655 gffffffe eeeeeedd"
-                          " 55554444 44444333 ddddcccc cccccbbb 33322222 22111111 bbbaaaaa aa999999")
-_SP303_PAT_B  = _sp303_p("pp888888 88888887 ppgggggg gggggggf 77777666 66666555 fffffeee eeeeeddd"
-                          " 55544444 44443333 dddccccc ccccbbbb 33222222 22111111 bbaaaaaa aa999999")
-_SP303_PAT_B3 = _sp303_p("ppp88888 88888887 pppggggg gggggggf 77777666 66666555 fffffeee eeeeeddd"
-                          " 55544444 44443333 dddccccc ccccbbbb 33222222 22111111 bbaaaaaa aa999999")
-_SP303_PAT_C  = _sp303_p("ppp88888 88888877 pppggggg ggggggff 77776666 66665555 ffffeeee eeeedddd"
-                          " 55444444 44443333 ddcccccc ccccbbbb 33222222 22111111 bbaaaaaa aa999999")
-_SP303_PAT_D  = _sp303_p("pp888888 88877777 ppgggggg gggfffff 77666666 66555555 ffeeeeee eedddddd"
-                          " 54444444 44333333 dccccccc ccbbbbbb 32222222 21111111 baaaaaaa a9999999")
-_SP303_PAT_E  = _sp303_p("pppp8888 88888877 ppppgggg ggggggff 77776666 66665555 ffffeeee eeeedddd"
-                          " 55444444 44443333 ddcccccc ccccbbbb 33222222 22111111 bbaaaaaa aa999999")
-_SP303_PAT_F  = _sp303_p("pppp8888 88887777 ppppgggg ggggffff 77766666 66655555 fffeeeee eeeddddd"
-                          " 55444444 44333333 ddcccccc ccbbbbbb 32222222 21111111 baaaaaaa a9999999")
-_SP303_PAT_B4 = _sp303_p("pppp8888 88888887 ppppgggg gggggggf 77777666 66665555 ffffffee eeeeeddd"
-                          " 55554444 44433333 ddddcccc cccbbbbb 33222222 21111111 bbaaaaaa a9999999")
+# Lattice reorder: firmware unpacks residuals into this sample order
+_SP303_LATTICE = [14, 6, 2, 10, 0, 4, 8, 12, 1, 3, 5, 7, 9, 11, 13, 15]
 
-_SP303_SYM = {c: i for i, c in enumerate('123456789abcdefg')}
-_SP303_SYM['p'] = -1
+# Bit width per format ID (from firmware Record[8] values)
+# 0x09 uses 5-bit residuals, all others use 7-bit
+_SP303_FMT_BITWIDTH = {
+    0x08: 7,   # Record[8] = 0x07
+    0x09: 5,   # Record[8] = 0x05
+    # 0x0A+: Record[8] = 0x7F → 7-bit default
+}
 
 # Firmware shift LUT at 0xB4C0 — 64 entries indexed by block[0] >> 2.
 _SP303_FW_SHIFT_LUT64 = [
@@ -1090,32 +1148,6 @@ _SP303_FW_SHIFT_LUT64 = [
      7,  7,  7,  6,  6,  5,  5,  5,  4,  4,  4,  3,  3,  2,  2,  2,
      1,  1,  1,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
 ]
-
-
-def _sp303_apply_pattern(block, pattern):
-    """Extract 16 symbols from a 16-byte block according to pattern.
-    Each symbol is sign-extended at its natural bit depth — no alignment.
-    Residuals stay smaller than anchors (they are corrections in the
-    hierarchical DPCM scheme, not full-scale values).
-    Returns (symbols, max_depth) where max_depth is the largest bit count.
-    """
-    out, out_pos = [0] * 16, [0] * 16
-    for in_pos in range(15, -1, -1):
-        byte_pat = pattern[in_pos * 8: in_pos * 8 + 8]
-        byte_val = block[in_pos]
-        for bit_pos in range(8):
-            out_idx = _SP303_SYM[byte_pat[7 - bit_pos]]
-            if out_idx == -1:
-                continue
-            if (byte_val >> bit_pos) & 1:
-                out[out_idx] |= 1 << out_pos[out_idx]
-            out_pos[out_idx] += 1
-    max_depth = max(out_pos) if any(out_pos) else 1
-    for i in range(16):
-        if out_pos[i] > 0:
-            mask = 1 << (out_pos[i] - 1)
-            out[i] = -(out[i] & mask) | out[i]
-    return out, max_depth
 
 
 def _sp303_shift_round(out, pos):
@@ -1162,61 +1194,134 @@ def _sp303_interp8(d0, out):
     out[12] += _sp303_interp(out[11], out[13]); out[14] += _sp303_interp(out[13], out[15])
 
 
-# Per-pattern fixed shift amounts and dispatch table.
-# pattern → (pat_str, shift, interp_func)
-# None entries → output zeros.  Shift from C reference SHIFT_ROUND_N per case.
-_SP303_MT1_DISPATCH = {
-    0:  None, 1: None,                                          # ZERO
-    2:  (_SP303_PAT_B,  0, _sp303_interp2),
-    3:  (_SP303_PAT_B,  1, _sp303_interp2),
-    4:  (_SP303_PAT_B,  2, _sp303_interp2),
-    5:  (_SP303_PAT_B,  3, _sp303_interp2),
-    6:  (_SP303_PAT_D,  2, _sp303_interp4),
-    7:  (_SP303_PAT_D,  3, _sp303_interp4),
-    8:  (_SP303_PAT_D,  4, _sp303_interp4),
-    9:  (_SP303_PAT_D,  5, _sp303_interp4),
-    10: (_SP303_PAT_D,  6, _sp303_interp4),
-    11: (_SP303_PAT_D,  7, _sp303_interp4),
-    12: None, 13: None, 14: None,                               # ZERO
-    15: (_SP303_PAT_A,  0, _sp303_interp2),
-    16: (_SP303_PAT_A,  1, _sp303_interp2),
-    17: (_SP303_PAT_A,  2, _sp303_interp2),
-    18: (_SP303_PAT_B3, 4, _sp303_interp2),
-    19: (_SP303_PAT_C,  0, _sp303_interp2),
-    20: (_SP303_PAT_C,  1, _sp303_interp2),
-    21: (_SP303_PAT_C,  2, _sp303_interp2),
-    22: (_SP303_PAT_C,  3, _sp303_interp2),
-    23: (_SP303_PAT_C,  4, _sp303_interp2),
-    24: (_SP303_PAT_C,  5, _sp303_interp2),
-    25: (_SP303_PAT_F,  4, _sp303_interp8),
-    26: (_SP303_PAT_F,  5, _sp303_interp8),
-    27: (_SP303_PAT_F,  6, _sp303_interp8),
-    28: (_SP303_PAT_F,  7, _sp303_interp8),
-    29: (_SP303_PAT_F,  8, _sp303_interp8),
-    30: (_SP303_PAT_F,  8, None),                               # DOUBLE_ODDS
-    31: (_SP303_PAT_E,  6, _sp303_interp4),
-    32: None, 33: None, 34: None, 35: None, 36: None,          # ZERO
+# Format ID → interpolation function (must be after interp function definitions)
+_SP303_FMT_INTERP = {
+    0x08: _sp303_interp2,
+    0x09: _sp303_interp4,
+    0x0A: _sp303_interp2,
+    0x0B: _sp303_interp2,
+    0x0C: _sp303_interp8,
 }
 
 
+def _sp303_extract_firmware(block, has_anchor, bit_width=7):
+    """Extract 16 residuals from a 16-byte block using firmware-derived bit layout.
+
+    SH-DSP dual-bank architecture:
+      Bank X = bytes 0-7 (64 bits), Bank Y = bytes 8-15 (64 bits)
+      X layout: [8-bit header | skip_x | 8 × W-bit residuals]
+      Y layout: [skip_y | N × W-bit residuals]  (N=7 if anchor, 8 if not)
+
+    Residuals are placed into output via _SP303_LATTICE ordering.
+    Anchor (sample[15]) is at the 16th lattice position when present.
+    """
+    bankX = int.from_bytes(block[0:8], 'big')
+    bankY = int.from_bytes(block[8:16], 'big')
+    out = [0] * 16
+
+    # X bank: 8 header bits + 8 residuals × bit_width
+    x_res_bits = 8 * bit_width
+    xp = 64 - x_res_bits  # X residuals start here (after header + skip)
+
+    if has_anchor:
+        # Y bank: 7 residuals (sample[15] is anchor, not a residual)
+        y_res_bits = 7 * bit_width
+        yp = 64 - y_res_bits
+
+        # Anchor extraction: interleaved X,Y starting after X header
+        # NOTE: This is UNVALIDATED — exhaustive search found 0 matches.
+        # The interleave pattern X8,Y0,X9,Y1... is from firmware analysis
+        # but the exact positions need further firmware investigation.
+        x_anchor_space = xp - 8  # bits between header and X residuals
+        if x_anchor_space >= 8:
+            # Standard 16-bit interleaved anchor from X skip and Y skip regions
+            txp = 8
+            typ = 0
+            anchor = 0
+            for _ in range(8):
+                anchor = (anchor << 1) | ((bankX >> (63 - txp)) & 1)
+                txp += 1
+                anchor = (anchor << 1) | ((bankY >> (63 - typ)) & 1)
+                typ += 1
+            if anchor >= 0x8000:
+                anchor -= 0x10000
+            out[15] = anchor
+        else:
+            # Y-only anchor for bit_width=7 (X has 0 spare bits after header)
+            n_anchor_bits = min(yp, 16)
+            anchor = 0
+            for i in range(n_anchor_bits):
+                anchor = (anchor << 1) | ((bankY >> (63 - i)) & 1)
+            if n_anchor_bits < 16:
+                anchor <<= (16 - n_anchor_bits)
+            if anchor >= 0x8000:
+                anchor -= 0x10000
+            out[15] = anchor
+    else:
+        # No anchor: Y bank has 8 residuals
+        y_res_bits = 8 * bit_width
+        yp = 64 - y_res_bits
+
+    half = 1 << (bit_width - 1)
+    full = 1 << bit_width
+
+    # Extract residuals in lattice order: pairs (X, Y)
+    for i in range(0, 16, 2):
+        sx = _SP303_LATTICE[i]
+        sy = _SP303_LATTICE[i + 1]
+
+        # X residual
+        val = 0
+        for _ in range(bit_width):
+            val = (val << 1) | ((bankX >> (63 - xp)) & 1)
+            xp += 1
+        if val >= half:
+            val -= full
+        out[sx] = val
+
+        # Y residual (skip if this is the anchor position)
+        if sy == 15 and has_anchor:
+            pass  # anchor already set above
+        else:
+            val = 0
+            for _ in range(bit_width):
+                val = (val << 1) | ((bankY >> (63 - yp)) & 1)
+                yp += 1
+            if val >= half:
+                val -= full
+            out[sy] = val
+
+    return out
+
+
 def _sp303_decode_mt1(d0: int, block: bytes) -> List[int]:
-    """Decode one 16-byte MT1 block to 16 signed 16-bit samples."""
-    p = _SP303_RDAC_PATTERNS[(block[0] & 0xf0) | ((block[2] & 0xf0) >> 4)]
-    entry = _SP303_MT1_DISPATCH.get(p)
-    if entry is None:
+    """Decode one 16-byte MT1 block to 16 signed 16-bit samples.
+
+    Uses firmware dispatch table for format selection, variable bit-width
+    extraction, firmware shift LUT, and hierarchical DPCM interpolation.
+    """
+    idx = (block[0] & 0xF0) | ((block[2] & 0xF0) >> 4)
+    fmt_id, sub_op, anchor_flag = _SP303_FW_DISPATCH[idx]
+    has_anchor = anchor_flag != 0x00
+
+    # fmt_id 0x00 = silence
+    if fmt_id == 0x00:
         return [0] * 16
 
-    pat_str, shift, interp_func = entry
-    out, _max_depth = _sp303_apply_pattern(block, pat_str)
+    # Get bit width and interp function for this format
+    bit_width = _SP303_FMT_BITWIDTH.get(fmt_id, 7)
+    interp_func = _SP303_FMT_INTERP.get(fmt_id)
 
-    # Fixed per-pattern shift (NOT computed from firmware LUT)
+    # Extract residuals using firmware bit layout
+    out = _sp303_extract_firmware(block, has_anchor, bit_width)
+
+    # Apply shift from firmware LUT (indexed by block[0] >> 2)
+    shift = _SP303_FW_SHIFT_LUT64[block[0] >> 2]
     _sp303_shift_round(out, shift)
 
+    # Hierarchical DPCM interpolation
     if interp_func:
         interp_func(d0, out)
-    elif p == 30:
-        for i in range(0, 16, 2):
-            out[i] <<= 1
 
     # Clamp to 16-bit signed range
     for i in range(16):
