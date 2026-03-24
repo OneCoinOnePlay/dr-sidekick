@@ -1190,9 +1190,9 @@ _SP303_LATTICE = [14, 6, 2, 10, 0, 4, 8, 12, 1, 3, 5, 7, 9, 11, 13, 15]
 # (1 bit absorbed by interleave alignment).
 _SP303_RESIDUAL_WIDTH = 6
 
-# Firmware jump table at 0xBCD0. This is safe to expose as metadata, but not to
-# use as decode behavior until each selector's sample writes and bit consumption
-# are grounded from disassembly.
+# Firmware jump table at 0xBCD0. CPU-side selector-to-routine mapping is now
+# stable enough to expose as metadata, but DSP-side selector effects are still
+# too incomplete to drive playback behavior.
 _SP303_SELECTOR_DISPATCH = {
     0: SP303SelectorDispatch(0, 0x6D00, 2, "kernel_a_variant_2"),
     1: SP303SelectorDispatch(1, 0x6100, 0, "kernel_b_variant_0"),
@@ -1200,9 +1200,10 @@ _SP303_SELECTOR_DISPATCH = {
     3: SP303SelectorDispatch(3, 0x6D00, 10, "kernel_a_variant_10"),
     4: SP303SelectorDispatch(4, 0x6100, 8, "kernel_b_variant_8"),
     5: SP303SelectorDispatch(5, 0x2900, 8, "kernel_d"),
-    6: SP303SelectorDispatch(6, None, None, "unknown_selector_6", verified=False),
+    6: SP303SelectorDispatch(6, None, None, "null_jump_entry"),
     7: SP303SelectorDispatch(7, 0x3808, 6, "kernel_e"),
 }
+
 
 # Firmware shift LUT at 0xB4C0 — 64 entries indexed by block[0] >> 2.
 # Used ONLY for formats 0x08 and 0x09.  Formats 0x0A+ use sub_op as shift.
@@ -1307,30 +1308,40 @@ def _sp303_extract_standard_anchor(block):
     return anchor
 
 
-def _sp303_extract_selectors(block):
-    """Extract the verified 5×3-bit selector field from the interleaved metadata path.
-
-    The selector field is firmware-verified, but selector-driven microkernel dispatch
-    is still unresolved and is therefore not applied by the software decoder yet.
-    """
+def _sp303_interleaved_metadata_bits(block):
+    """Return the first 32 interleaved metadata bits from the firmware path."""
     bankX = int.from_bytes(block[0:8], 'big')
     bankY = int.from_bytes(block[8:16], 'big')
     bits = []
-    for i in range(8, 16):
-        bits.append((bankX >> (63 - i)) & 1)
-        bits.append((bankY >> (71 - i)) & 1)
-    selector_bits = bits[16:31]
+    for i in range(16):
+        bits.append(str((bankX >> (63 - (8 + i))) & 1))
+        bits.append(str((bankY >> (63 - i)) & 1))
+    return "".join(bits)
+
+
+def _sp303_decode_selector_bits(selector_bits):
+    """Decode a 15-bit selector string into five 3-bit selector values."""
     selectors = []
-    for offset in range(0, 15, 3):
-        value = 0
-        for bit in selector_bits[offset:offset + 3]:
-            value = (value << 1) | bit
-        selectors.append(value)
+    for offset in range(0, min(len(selector_bits), 15), 3):
+        chunk = selector_bits[offset:offset + 3]
+        if len(chunk) < 3:
+            break
+        selectors.append(int(chunk, 2))
     return selectors
 
 
+def _sp303_extract_selectors(block):
+    """Extract the verified 5×3-bit selector field from the interleaved metadata path.
+
+    The selector field and CPU-side jump-table mapping are firmware-verified.
+    The software decoder still does not apply selector-driven DSP behavior,
+    because the kernel-side write counts and bit consumption are not fully
+    grounded yet.
+    """
+    bits = _sp303_interleaved_metadata_bits(block)
+    return _sp303_decode_selector_bits(bits[16:31])
 def _sp303_selector_dispatch_trace(selectors):
-    """Map raw selectors to the verified jump-table metadata only."""
+    """Map raw selectors to the verified CPU-side jump-table metadata only."""
     trace = []
     for selector in selectors:
         entry = _SP303_SELECTOR_DISPATCH.get(
@@ -1347,27 +1358,30 @@ def _sp303_selector_dispatch_trace(selectors):
             }
         )
     return trace
-
-
 def _sp303_extract_firmware(block, use_standard_anchor):
     """Extract 16 values from a 16-byte block using the verified decoder scaffold.
 
-    SH-DSP dual-bank architecture (confirmed by firmware disassembly):
-      Bank X = bytes 0-7  (64 bits) → accumulator a1 via movx.w @r4+, x0
-      Bank Y = bytes 8-15 (64 bits) → accumulator a0 via movy.w @r6+, y0
+    This extraction layout is the current production scaffold, not a fully
+    executed SH-DSP proof. It matches the grounded CPU-side metadata path while
+    leaving unresolved DSP-side behavior out of playback decisions.
+
+    Dual-bank block layout used here:
+      Bank X = bytes 0-7  (64 bits)
+      Bank Y = bytes 8-15 (64 bits)
 
     Bit budget (128 bits total, anchored):
       Header:    8 bits  (X[0:7] — dispatch index)
       Anchor:   16 bits  (standard mode only: interleaved X8,Y0,X9,Y1,...X15,Y7)
       Selectors: 15 bits (5×3-bit, from same interleaved stream)
-      Residuals: 90 bits (15 × 6-bit via pshl #1,0x6)
+      Residuals: 90 bits (15 × 6-bit residual values in the current scaffold)
 
     This only applies the standard 0x40 anchor mode. Non-standard anchor modes
     remain unresolved in firmware analysis, so the decoder leaves them on the
     anchorless path instead of forcing them through the standard extractor.
 
-    Selector extraction is firmware-verified and exposed separately, but selector-
-    driven microkernel dispatch is still unresolved and is not applied here.
+    Selector extraction and CPU-side jump-table mapping are firmware-verified
+    and exposed separately, but DSP-side selector behavior and the real load
+    path are still unresolved and are not applied here.
     """
     W = _SP303_RESIDUAL_WIDTH  # 6
     bankX = int.from_bytes(block[0:8], 'big')
@@ -1416,13 +1430,11 @@ def _sp303_extract_firmware(block, use_standard_anchor):
             out[sy] = val
 
     return out
-
-
 def _sp303_prepare_mt1(d0: int, block: bytes):
     """Prepare the firmware-grounded decoder state for one MT1 block.
 
-    This exposes verified dispatch metadata and extracted selector bits without
-    assuming unresolved selector-driven microkernel behavior.
+    This exposes verified CPU-side dispatch metadata and extracted selector bits
+    without treating unresolved DSP-side selector behavior as decoder truth.
     """
     idx = (block[0] & 0xF0) | ((block[2] & 0xF0) >> 4)
     fmt_id, sub_op, anchor_flag = _SP303_FW_DISPATCH[idx]
@@ -1435,8 +1447,10 @@ def _sp303_prepare_mt1(d0: int, block: bytes):
         notes.append(
             f"non-standard anchor flag 0x{anchor_flag:02X} is not implemented as an explicit anchor path"
         )
+    if any(item["selector"] == 6 for item in selector_dispatch):
+        notes.append("selector 6 maps to the verified null jump-table entry bytes at 0xBCE8")
     if any(not item["verified"] for item in selector_dispatch):
-        notes.append("one or more selectors map to unresolved jump-table behavior")
+        notes.append("one or more selectors still map to unresolved jump-table behavior")
 
     if fmt_id <= 0x07:
         out = [0] * 16
