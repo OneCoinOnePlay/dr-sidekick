@@ -1215,6 +1215,67 @@ _SP303_FW_SHIFT_LUT64 = [
 ]
 
 
+_SP303_RDAC_PATTERNS = [
+    0, 0, 0, 0,  1, 1, 1, 1,  2, 2, 2, 2,  3, 3, 3, 3,
+    0, 0, 0, 0,  1, 1, 1, 1,  2, 2, 2, 2,  3, 3, 3, 3,
+    0, 0, 0, 0,  1, 1, 1, 1,  2, 2, 2, 2,  3, 3, 3, 3,
+    0, 0, 0, 0,  1, 1, 1, 1,  2, 2, 2, 2,  3, 3, 3, 3,
+    4, 4, 4, 4,  5, 5, 5, 5,  6, 6, 6, 6,  7, 7, 7, 7,
+    4, 4, 4, 4,  5, 5, 5, 5,  6, 6, 6, 6,  7, 7, 7, 7,
+    4, 4, 4, 4,  5, 5, 5, 5,  6, 6, 6, 6,  7, 7, 7, 7,
+    4, 4, 4, 4,  5, 5, 5, 5,  6, 6, 6, 6,  7, 7, 7, 7,
+    8, 8, 8, 8,  9, 9, 9, 9,  10, 10, 10, 10, 11, 11, 11, 11,
+    8, 8, 8, 8,  9, 9, 9, 9,  10, 10, 10, 10, 11, 11, 11, 11,
+    8, 8, 8, 8,  9, 9, 9, 9,  10, 10, 10, 10, 11, 11, 11, 11,
+    8, 8, 8, 8,  9, 9, 9, 9,  10, 10, 10, 10, 11, 11, 11, 11,
+    12, 12, 13, 13, 14, 14, 15, 15, 16, 16, 17, 17, 18, 18, 19, 19,
+    12, 12, 13, 13, 14, 14, 15, 15, 16, 16, 17, 17, 18, 18, 19, 19,
+    20, 20, 21, 21, 22, 22, 23, 23, 24, 24, 25, 26, 27, 28, 29, 30,
+    20, 20, 21, 21, 22, 22, 23, 23, 24, 24, 31, 32, 33, 34, 35, 36,
+]
+
+
+def _sp303_p(s):
+    return s.replace(" ", "")
+
+
+_SP303_PAT_A = _sp303_p(
+    "ppp88888 88888888 pppggggg gggggggg 87777776 66666655 gffffffe eeeeeedd"
+    " 55554444 44444333 ddddcccc cccccbbb 33322222 22111111 bbbaaaaa aa999999"
+)
+_SP303_PAT_B = _sp303_p(
+    "pp888888 88888887 ppgggggg gggggggf 77777666 66666555 fffffeee eeeeeddd"
+    " 55544444 44443333 dddccccc ccccbbbb 33222222 22111111 bbaaaaaa aa999999"
+)
+_SP303_PAT_B3 = _sp303_p(
+    "ppp88888 88888887 pppggggg gggggggf 77777666 66666555 fffffeee eeeeeddd"
+    " 55544444 44443333 dddccccc ccccbbbb 33222222 22111111 bbaaaaaa aa999999"
+)
+_SP303_PAT_C = _sp303_p(
+    "ppp88888 88888877 pppggggg ggggggff 77776666 66665555 ffffeeee eeeedddd"
+    " 55444444 44443333 ddcccccc ccccbbbb 33222222 22111111 bbaaaaaa aa999999"
+)
+_SP303_PAT_D = _sp303_p(
+    "pp888888 88877777 ppgggggg gggfffff 77666666 66555555 ffeeeeee eedddddd"
+    " 54444444 44333333 dccccccc ccbbbbbb 32222222 21111111 baaaaaaa a9999999"
+)
+_SP303_PAT_E = _sp303_p(
+    "pppp8888 88888877 ppppgggg ggggggff 77776666 66665555 ffffeeee eeeedddd"
+    " 55444444 44443333 ddcccccc ccccbbbb 33222222 22111111 bbaaaaaa aa999999"
+)
+_SP303_PAT_F = _sp303_p(
+    "pppp8888 88887777 ppppgggg ggggffff 77766666 66655555 fffeeeee eeeddddd"
+    " 55444444 44333333 ddcccccc ccbbbbbb 32222222 21111111 baaaaaaa a9999999"
+)
+_SP303_PAT_B4 = _sp303_p(
+    "pppp8888 88888887 ppppgggg gggggggf 77777666 66665555 ffffffee eeeeeddd"
+    " 55554444 44433333 ddddcccc cccbbbbb 33222222 21111111 bbaaaaaa a9999999"
+)
+
+_SP303_SYM = {c: i for i, c in enumerate("123456789abcdefg")}
+_SP303_SYM["p"] = -1
+
+
 def _sp303_shift_round(out, pos):
     if pos == 0:
         return
@@ -1226,6 +1287,26 @@ def _sp303_shift_round(out, pos):
         rsh = -pos
         for i in range(16):
             out[i] >>= rsh
+
+
+def _sp303_apply_pattern(block, pattern):
+    out, out_pos = [0] * 16, [0] * 16
+    for in_pos in range(15, -1, -1):
+        byte_pat = pattern[in_pos * 8: in_pos * 8 + 8]
+        byte_val = block[in_pos]
+        for bit_pos in range(8):
+            out_idx = _SP303_SYM[byte_pat[7 - bit_pos]]
+            if out_idx == -1:
+                continue
+            if (byte_val >> bit_pos) & 1:
+                out[out_idx] |= 1 << out_pos[out_idx]
+            out_pos[out_idx] += 1
+    max_depth = max(out_pos) if any(out_pos) else 1
+    for i in range(16):
+        if out_pos[i] > 0:
+            mask = 1 << (out_pos[i] - 1)
+            out[i] = -(out[i] & mask) | out[i]
+    return out, max_depth
 
 
 def _sp303_interp(a, b):
@@ -1508,6 +1589,55 @@ def _sp303_decode_mt1(d0: int, block: bytes) -> List[int]:
     return _sp303_prepare_mt1(d0, block).samples
 
 
+def _sp303_decode_mt1_playback(d0: int, block: bytes) -> List[int]:
+    """Decode one MT1 block using the known-good audible PAT/depth path.
+
+    This remains the active playback decoder because it materially outperforms
+    the newer firmware-grounded scaffold by ear. The firmware scaffold is kept
+    separately for inspection and ongoing reverse engineering.
+    """
+    p = _SP303_RDAC_PATTERNS[(block[0] & 0xF0) | ((block[2] & 0xF0) >> 4)]
+    lut_val = _SP303_FW_SHIFT_LUT64[block[0] >> 2]
+
+    pat_map = {
+        0: (_SP303_PAT_B, _sp303_interp2), 1: (_SP303_PAT_B, _sp303_interp2),
+        2: (_SP303_PAT_B, _sp303_interp2), 3: (_SP303_PAT_B, _sp303_interp2),
+        4: (_SP303_PAT_B, _sp303_interp2), 5: (_SP303_PAT_B, _sp303_interp2),
+        6: (_SP303_PAT_D, _sp303_interp4), 7: (_SP303_PAT_D, _sp303_interp4),
+        8: (_SP303_PAT_D, _sp303_interp4), 9: (_SP303_PAT_D, _sp303_interp4),
+        10: (_SP303_PAT_D, _sp303_interp4), 11: (_SP303_PAT_D, _sp303_interp4),
+        12: (_SP303_PAT_A, _sp303_interp2), 13: (_SP303_PAT_A, _sp303_interp2),
+        14: (_SP303_PAT_A, _sp303_interp2), 15: (_SP303_PAT_A, _sp303_interp2),
+        16: (_SP303_PAT_A, _sp303_interp2), 17: (_SP303_PAT_A, _sp303_interp2),
+        18: (_SP303_PAT_B3, _sp303_interp2),
+        19: (_SP303_PAT_C, _sp303_interp2), 20: (_SP303_PAT_C, _sp303_interp2),
+        21: (_SP303_PAT_C, _sp303_interp2), 22: (_SP303_PAT_C, _sp303_interp2),
+        23: (_SP303_PAT_C, _sp303_interp2), 24: (_SP303_PAT_C, _sp303_interp2),
+        25: (_SP303_PAT_F, _sp303_interp8), 26: (_SP303_PAT_F, _sp303_interp8),
+        27: (_SP303_PAT_F, _sp303_interp8), 28: (_SP303_PAT_F, _sp303_interp8),
+        29: (_SP303_PAT_F, _sp303_interp8),
+        30: (_SP303_PAT_F, None),
+        31: (_SP303_PAT_E, _sp303_interp4),
+        32: (_SP303_PAT_B4, _sp303_interp2), 33: (_SP303_PAT_B4, _sp303_interp2),
+        34: (_SP303_PAT_B4, _sp303_interp2), 35: (_SP303_PAT_B4, _sp303_interp2),
+        36: (_SP303_PAT_B4, _sp303_interp2),
+    }
+
+    if p not in pat_map:
+        return [0] * 16
+
+    pat_str, interp_func = pat_map[p]
+    out, max_depth = _sp303_apply_pattern(block, pat_str)
+    shift = (23 - max(1, max_depth)) - lut_val
+    _sp303_shift_round(out, shift)
+    if interp_func:
+        interp_func(d0, out)
+    elif p == 30:
+        for i in range(0, 16, 2):
+            out[i] <<= 1
+    return out
+
+
 def sp303_inspect_mt1_block(d0: int, block: bytes) -> dict:
     """Return firmware-grounded metadata for one MT1 block.
 
@@ -1547,14 +1677,14 @@ def sp303_decode_sp0(path: str) -> List[int]:
     """Decode an SP0 file to a flat list of 16-bit PCM samples (31250 Hz native)."""
     file_size = os.path.getsize(path)
     samples: List[int] = []
-    d0 = 0  # 16-bit predictor (last sample of previous block)
+    d0 = 0
     with open(path, 'rb') as f:
         for _ in range(file_size // 16):
             block = f.read(16)
             if len(block) < 16:
                 break
-            chunk = _sp303_decode_mt1(d0, block)
-            samples.extend(chunk)
+            chunk = _sp303_decode_mt1_playback(d0, block)
+            samples.extend(max(-32768, min(32767, sample >> 8)) for sample in chunk)
             d0 = chunk[15]
     return samples
 
