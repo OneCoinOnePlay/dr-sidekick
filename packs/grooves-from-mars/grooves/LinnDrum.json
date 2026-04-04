@@ -466,6 +466,11 @@
       "grid_label": "16T",
       "steps_per_beat": 6,
       "beats": 16,
+      "capacity_overrides": {
+        "sp303": {
+          "fallback_beats": 8
+        }
+      },
       "offsets": [
         0,
         -1,
@@ -953,6 +958,11 @@
       "category": "patterns",
       "ppqn": 96,
       "beats": 16,
+      "capacity_overrides": {
+        "sp303": {
+          "fallback_beats": 8
+        }
+      },
       "ticks": [
         0,
         16,
@@ -1456,6 +1466,11 @@
       "category": "patterns",
       "ppqn": 96,
       "beats": 16,
+      "capacity_overrides": {
+        "sp303": {
+          "fallback_beats": 8
+        }
+      },
       "ticks": [
         0,
         16,
@@ -1618,6 +1633,11 @@
       "category": "patterns",
       "ppqn": 96,
       "beats": 16,
+      "capacity_overrides": {
+        "sp303": {
+          "fallback_beats": 8
+        }
+      },
       "ticks": [
         0,
         16,
@@ -1715,6 +1735,11 @@
       "category": "patterns",
       "ppqn": 96,
       "beats": 16,
+      "capacity_overrides": {
+        "sp303": {
+          "fallback_beats": 8
+        }
+      },
       "ticks": [
         0,
         15,
@@ -1877,6 +1902,11 @@
       "category": "patterns",
       "ppqn": 96,
       "beats": 16,
+      "capacity_overrides": {
+        "sp303": {
+          "fallback_beats": 8
+        }
+      },
       "ticks": [
         0,
         16,
@@ -1974,6 +2004,11 @@
       "category": "patterns",
       "ppqn": 96,
       "beats": 16,
+      "capacity_overrides": {
+        "sp303": {
+          "fallback_beats": 8
+        }
+      },
       "ticks": [
         0,
         16,
@@ -2136,6 +2171,11 @@
       "category": "patterns",
       "ppqn": 96,
       "beats": 16,
+      "capacity_overrides": {
+        "sp303": {
+          "fallback_beats": 8
+        }
+      },
       "ticks": [
         0,
         15,
@@ -2233,6 +2273,11 @@
       "category": "patterns",
       "ppqn": 96,
       "beats": 16,
+      "capacity_overrides": {
+        "sp303": {
+          "fallback_beats": 8
+        }
+      },
       "ticks": [
         0,
         15,
@@ -2395,6 +2440,11 @@
       "category": "patterns",
       "ppqn": 96,
       "beats": 16,
+      "capacity_overrides": {
+        "sp303": {
+          "fallback_beats": 8
+        }
+      },
       "ticks": [
         0,
         16,
@@ -2719,6 +2769,11 @@
       "category": "patterns",
       "ppqn": 96,
       "beats": 16,
+      "capacity_overrides": {
+        "sp303": {
+          "fallback_beats": 8
+        }
+      },
       "ticks": [
         0,
         16,

@@ -1224,6 +1224,11 @@
       "category": "grooves",
       "ppqn": 96,
       "beats": 16,
+      "capacity_overrides": {
+        "sp303": {
+          "fallback_beats": 8
+        }
+      },
       "ticks": [
         0,
         15,

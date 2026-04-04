@@ -132,6 +132,27 @@ class GrooveTemplate:
     beats: int = 0
     offsets: List[int] = field(default_factory=list)  # grid-type
     ticks: List[int] = field(default_factory=list)    # compound-type
+    capacity_overrides: Dict[str, dict] = field(default_factory=dict)
+
+    def fallback_beats_for_device(self, device_key: str) -> Optional[int]:
+        """Return an optional device-specific groove length override in beats."""
+        if not device_key:
+            return None
+        override = self.capacity_overrides.get(device_key, {})
+        fallback_beats = override.get("fallback_beats")
+        if fallback_beats is None:
+            return None
+        try:
+            return max(1, int(round(float(fallback_beats))))
+        except (TypeError, ValueError):
+            return None
+
+    def effective_beats_for_device(self, device_key: str) -> int:
+        """Return the authored or device-adjusted groove length in beats."""
+        fallback_beats = self.fallback_beats_for_device(device_key)
+        if fallback_beats is not None:
+            return fallback_beats
+        return self.beats
 
 
 class GrooveLibrary:
@@ -198,6 +219,7 @@ class GrooveLibrary:
                         beats=g.get("beats", 0),
                         offsets=offsets,
                         ticks=ticks,
+                        capacity_overrides=g.get("capacity_overrides", {}),
                     )
                     templates.append(tmpl)
                 self._by_machine[machine] = templates
@@ -218,6 +240,8 @@ class PatternSlot:
     slot_index: int
     has_pattern: bool = False
     quantize: str = "OFF"
+    length_bars: int = 2
+    pattern_index: Optional[int] = None
 
     @property
     def bank(self) -> Bank:
@@ -229,43 +253,47 @@ class PatternSlot:
 
     def to_bytes(self) -> bytes:
         """
-        PTNINFO format (hardware-verified):
-        - EMPTY:  [B0 04 02 slot+1]
-        - ACTIVE: [04 B0 quant 00]
+        PTNINFO mapping format (hardware-verified):
+        - MAPPING: [B0 04 bars pattern_index]
 
-        Quantize values:
-        0x00=OFF, 0x01=1/4, 0x02=1/8, 0x03=1/16, 0x04=1/8T, 0x05=1/16T
+        PTNINFO does not reliably encode slot occupancy by itself. Hardware-
+        authored cards use this same mapping form for both empty/default slots
+        and populated slots, with PTNDATA holding the pattern body.
         """
-        if not self.has_pattern:
-            # Empty slot format
-            return bytes([0xb0, 0x04, 0x02, self.slot_index + 1])
-        else:
-            # Active slot format
-            quant_map = {
-                "OFF": 0x00,
-                "1/4": 0x01,
-                "1/8": 0x02,
-                "1/16": 0x03,
-                "1/8T": 0x04,
-                "1/16T": 0x05
-            }
-            quant_byte = quant_map.get(self.quantize, 0x00)
-            return bytes([0x04, 0xb0, quant_byte, 0x00])
+        bars = max(1, min(MAX_PATTERN_LENGTH_BARS, int(self.length_bars)))
+        pattern_index = self.pattern_index
+        if pattern_index is None:
+            pattern_index = self.slot_index + 1
+        pattern_index = max(1, min(SLOT_COUNT, int(pattern_index)))
+        return bytes([0xB0, 0x04, bars, pattern_index])
 
     @classmethod
     def from_bytes(cls, slot_index: int, data: bytes) -> 'PatternSlot':
         """
-        Parse PTNINFO slot data (hardware-verified):
-        - EMPTY:  [B0 04 02 slot+1]
-        - ACTIVE: [04 B0 quant 00]
+        Parse PTNINFO slot data.
+
+        Current hardware-authored evidence supports:
+        - MAPPING: [B0 04 bars pattern_index]
+
+        Legacy app/authored captures also used:
+        - LEGACY: [04 B0 value index]
         """
         if len(data) < 4:
             raise ValueError(f"Slot data must be 4 bytes, got {len(data)}")
 
         b0, b1, b2, b3 = data[0], data[1], data[2], data[3]
 
-        if b0 == 0x04 and b1 == 0xb0:
-            # Active slot
+        if b0 == 0xB0 and b1 == 0x04:
+            bars = b2 if 1 <= b2 <= MAX_PATTERN_LENGTH_BARS else 2
+            pattern_index = b3 if 1 <= b3 <= SLOT_COUNT else (slot_index + 1)
+            return cls(
+                slot_index=slot_index,
+                has_pattern=False,
+                quantize="OFF",
+                length_bars=bars,
+                pattern_index=pattern_index,
+            )
+        if b0 == 0x04 and b1 == 0xB0:
             quant_map = {
                 0x00: "OFF",
                 0x01: "1/4",
@@ -275,13 +303,21 @@ class PatternSlot:
                 0x05: "1/16T"
             }
             quantize = quant_map.get(b2, "OFF")
-            return cls(slot_index=slot_index, has_pattern=True, quantize=quantize)
-        elif b0 == 0xb0 and b1 == 0x04 and b2 == 0x02:
-            # Empty slot
-            return cls(slot_index=slot_index, has_pattern=False, quantize="OFF")
-        else:
-            # Unknown format - treat as empty
-            return cls(slot_index=slot_index, has_pattern=False, quantize="OFF")
+            pattern_index = b3 if 1 <= b3 <= SLOT_COUNT else (slot_index + 1)
+            return cls(
+                slot_index=slot_index,
+                has_pattern=False,
+                quantize=quantize,
+                length_bars=b2 if 1 <= b2 <= MAX_PATTERN_LENGTH_BARS else 2,
+                pattern_index=pattern_index,
+            )
+        return cls(
+            slot_index=slot_index,
+            has_pattern=False,
+            quantize="OFF",
+            length_bars=2,
+            pattern_index=slot_index + 1,
+        )
 
 
 class PTNInfo:
@@ -292,16 +328,30 @@ class PTNInfo:
         for i in range(SLOT_COUNT):
             self.slots.append(PatternSlot(i))
     
-    def set_pattern(self, slot_index: int, quantize: str):
+    def set_pattern(
+        self,
+        slot_index: int,
+        quantize: str = "OFF",
+        bars: Optional[int] = None,
+        pattern_index: Optional[int] = None,
+    ):
         if not 0 <= slot_index < SLOT_COUNT:
             raise ValueError(f"Slot must be 0-15, got {slot_index}")
         self.slots[slot_index].has_pattern = True
         self.slots[slot_index].quantize = quantize
+        if bars is not None:
+            self.slots[slot_index].length_bars = max(1, min(MAX_PATTERN_LENGTH_BARS, int(round(bars))))
+        if pattern_index is not None:
+            self.slots[slot_index].pattern_index = max(1, min(SLOT_COUNT, int(pattern_index)))
+        elif self.slots[slot_index].pattern_index is None:
+            self.slots[slot_index].pattern_index = slot_index + 1
     
     def clear_pattern(self, slot_index: int):
         if not 0 <= slot_index < SLOT_COUNT:
             raise ValueError(f"Slot must be 0-15, got {slot_index}")
         self.slots[slot_index].has_pattern = False
+        self.slots[slot_index].length_bars = 2
+        self.slots[slot_index].pattern_index = slot_index + 1
     
     def to_bytes(self) -> bytes:
         data = bytearray()
@@ -405,6 +455,26 @@ class PTNData:
         if not 0 <= slot_index < SLOT_COUNT:
             raise ValueError(f"Slot must be 0-15, got {slot_index}")
         return 0xED90 - (slot_index * SLOT_SIZE)
+
+    def slot_has_serialized_events(self, slot_index: int) -> bool:
+        """Heuristic occupancy check based on the tuple stream, not PTNINFO."""
+        slot_offset = self.get_slot_offset(slot_index)
+        data_offset = slot_offset + 0x70
+        tuple_zone_end = slot_offset + 0x272
+        tuples = [
+            bytes(self.data[offset:offset + 6])
+            for offset in range(data_offset, tuple_zone_end, 6)
+            if offset + 6 <= len(self.data)
+        ]
+        if len(tuples) < 2:
+            return False
+
+        for idx in range(len(tuples)):
+            tail = tuples[idx:idx + 8]
+            if len(tail) == 8 and len(set(tail)) == 1:
+                return idx > 1
+
+        return any(chunk != tuples[-1] for chunk in tuples[:-1])
     
     def encode_events(self, events: List[Event], total_length_ticks: Optional[int] = None) -> bytes:
         """
@@ -532,15 +602,19 @@ class PTNData:
                 f"(max {max_serialized_len}, reserving {TUPLE_ZONE_SENTINEL_BYTES} bytes for the end marker)"
             )
         self.data[data_offset:data_offset+len(serialized)] = serialized
+        sentinel_tuple = bytes([0xFF, 0x80, 0x00, 0x00, 0x00, 0x00])
+        sentinel_offset = data_offset + len(serialized)
+        self.data[sentinel_offset:sentinel_offset + TUPLE_ZONE_SENTINEL_BYTES] = sentinel_tuple
         
         # Clear/fill only the tuple payload zone.
         #
         # Hardware captures show a fixed trailer beginning at slot+0x272.
         # Zeroing beyond this boundary destroys trailer metadata and causes
         # loop-length behavior regressions on device.
-        clear_offset = data_offset + len(serialized)
+        clear_offset = sentinel_offset + TUPLE_ZONE_SENTINEL_BYTES
 
-        # Use the slot's native fill tuple so we preserve on-card semantics:
+        # Use the slot's native fill tuple so we preserve on-card semantics
+        # after the explicit end marker:
         #   ff 80 00 00 10 00   (common)
         #   ff 80 00 00 00 00   (also observed)
         fill_tuple = bytes(self.data[slot_offset + 0x74:slot_offset + 0x7A])
@@ -674,21 +748,25 @@ class PTNData:
     
     def decode_events(self, slot_index: int) -> List[Event]:
         """
-        Decode events from slot (v2.7 - WITH REST EVENT FILTERING)
+        Decode events from one PTNDATA storage slot.
 
-        Hardware format:
-        - Header (6 bytes):  00 00 00 00 [checksum] 80
-        - Pattern marker (4 bytes): 04 03 16 00
-        - Events (6 bytes each): [delta] [pad] [vel] [flags] [sp1] [sp2]
-
-        Note: Filters out rest events (velocity=0) used for spanning large deltas
+        Two layouts are supported:
+        - Legacy app-authored stream: header + 04031600 marker + 6-byte events
+        - Hardware-authored stream: 6-byte tuples where timing/pad live in bytes 4-5
         """
         slot_offset = self.get_slot_offset(slot_index)
         data_offset = slot_offset + 0x70
+        tuple_zone_end = min(len(self.data), slot_offset + 0x272)
 
-        # Skip header (6 bytes) + pattern marker (4 bytes) = 10 bytes
+        marker = bytes(self.data[data_offset + 6:data_offset + 10])
+        if marker == bytes([0x04, 0x03, 0x16, 0x00]):
+            return self._decode_legacy_events(data_offset)
+        return self._decode_hardware_events(data_offset, tuple_zone_end)
+
+    def _decode_legacy_events(self, data_offset: int) -> List[Event]:
+        """Decode the legacy app-authored header + marker event stream."""
         offset = data_offset + 10
-        events = []
+        events: List[Event] = []
         current_tick = 0
 
         for i in range(200):  # Increased limit to handle rest events
@@ -728,6 +806,46 @@ class PTNData:
 
             current_tick += delta
             offset += 6
+
+        return events
+
+    def _decode_hardware_events(self, data_offset: int, tuple_zone_end: int) -> List[Event]:
+        """Decode hardware-authored tuples using the captured timing/pad layout."""
+        tuples = [
+            bytes(self.data[offset:offset + 6])
+            for offset in range(data_offset, tuple_zone_end, 6)
+            if offset + 6 <= len(self.data)
+        ]
+        if len(tuples) < 2:
+            return []
+
+        fill_tuple: Optional[bytes] = None
+        fill_idx: Optional[int] = None
+        for idx in range(len(tuples)):
+            tail = tuples[idx:idx + 8]
+            if len(tail) == 8 and len(set(tail)) == 1:
+                fill_tuple = tail[0]
+                fill_idx = idx
+                break
+
+        events: List[Event] = []
+        current_tick = 0
+        for idx, tuple_bytes in enumerate(tuples):
+            if fill_idx is not None and idx >= fill_idx:
+                break
+
+            delta = tuple_bytes[4]
+            pad = tuple_bytes[5]
+
+            if pad == 0x80:
+                current_tick += delta
+                continue
+
+            if not (0x00 <= pad <= 0x1F):
+                break
+
+            events.append(Event(tick=current_tick, pad=pad, velocity=0x7F))
+            current_tick += delta
 
         return events
     
@@ -1289,6 +1407,27 @@ def _sp303_shift_round(out, pos):
             out[i] >>= rsh
 
 
+def _sp303_sign_extend(value: int, bits: int) -> int:
+    mask = (1 << bits) - 1
+    value &= mask
+    sign = 1 << (bits - 1)
+    return (value ^ sign) - sign
+
+
+def _sp303_mask_l(byte_val: int, mask: int, lsh: int) -> int:
+    return (byte_val & mask) << lsh
+
+
+def _sp303_mask_r(byte_val: int, mask: int, rsh: int) -> int:
+    return (byte_val & mask) >> rsh
+
+
+def _sp303_shift_round_value(value: int, pos: int) -> int:
+    if pos <= 0:
+        return value >> (-pos) if pos < 0 else value
+    return (value << pos) | (1 << (pos - 1))
+
+
 def _sp303_apply_pattern(block, pattern):
     out, out_pos = [0] * 16, [0] * 16
     for in_pos in range(15, -1, -1):
@@ -1307,6 +1446,52 @@ def _sp303_apply_pattern(block, pattern):
             mask = 1 << (out_pos[i] - 1)
             out[i] = -(out[i] & mask) | out[i]
     return out, max_depth
+
+
+def _sp303_apply_pattern_b_explicit(block: bytes, shift: int) -> List[int]:
+    b = block
+    raw = [
+        (_sp303_mask_l(b[13], 0x3F, 0), 6),
+        (_sp303_mask_l(b[12], 0x3F, 2) | _sp303_mask_r(b[13], 0xC0, 6), 8),
+        (_sp303_mask_l(b[9], 0x0F, 2) | _sp303_mask_r(b[12], 0xC0, 6), 6),
+        (_sp303_mask_l(b[8], 0x1F, 4) | _sp303_mask_r(b[9], 0xF0, 4), 9),
+        (_sp303_mask_l(b[5], 0x07, 3) | _sp303_mask_r(b[8], 0xE0, 5), 6),
+        (_sp303_mask_l(b[4], 0x07, 5) | _sp303_mask_r(b[5], 0xF8, 3), 8),
+        (_sp303_mask_l(b[1], 0x01, 5) | _sp303_mask_r(b[4], 0xF8, 3), 6),
+        (_sp303_mask_l(b[0], 0x3F, 7) | _sp303_mask_r(b[1], 0xFE, 1), 13),
+        (_sp303_mask_l(b[15], 0x3F, 0), 6),
+        (_sp303_mask_l(b[14], 0x3F, 2) | _sp303_mask_r(b[15], 0xC0, 6), 8),
+        (_sp303_mask_l(b[11], 0x0F, 2) | _sp303_mask_r(b[14], 0xC0, 6), 6),
+        (_sp303_mask_l(b[10], 0x1F, 4) | _sp303_mask_r(b[11], 0xF0, 4), 9),
+        (_sp303_mask_l(b[7], 0x07, 3) | _sp303_mask_r(b[10], 0xE0, 5), 6),
+        (_sp303_mask_l(b[6], 0x07, 5) | _sp303_mask_r(b[7], 0xF8, 3), 8),
+        (_sp303_mask_l(b[3], 0x01, 5) | _sp303_mask_r(b[6], 0xF8, 3), 6),
+        (_sp303_mask_l(b[2], 0x3F, 7) | _sp303_mask_r(b[3], 0xFE, 1), 13),
+    ]
+    return [_sp303_shift_round_value(_sp303_sign_extend(val, bits), shift) for val, bits in raw]
+
+
+def _sp303_apply_pattern_d_explicit(block: bytes, shift: int) -> List[int]:
+    b = block
+    raw = [
+        (_sp303_mask_l(b[9], 0x0F, 0), 4),
+        (_sp303_mask_l(b[8], 0x03, 4) | _sp303_mask_r(b[9], 0xF0, 4), 6),
+        (_sp303_mask_r(b[8], 0x3C, 2), 4),
+        (_sp303_mask_l(b[5], 0x3F, 2) | _sp303_mask_r(b[8], 0xC0, 6), 8),
+        (_sp303_mask_l(b[4], 0x03, 2) | _sp303_mask_r(b[5], 0xC0, 6), 4),
+        (_sp303_mask_r(b[4], 0xFC, 2), 6),
+        (_sp303_mask_r(b[1], 0x0F, 0), 4),
+        (_sp303_mask_l(b[0], 0x0F, 4) | _sp303_mask_r(b[1], 0xF0, 4), 8),
+        (_sp303_mask_l(b[11], 0x0F, 0), 4),
+        (_sp303_mask_l(b[10], 0x03, 4) | _sp303_mask_r(b[11], 0xF0, 4), 6),
+        (_sp303_mask_r(b[10], 0x3C, 2), 4),
+        (_sp303_mask_l(b[7], 0x3F, 2) | _sp303_mask_r(b[10], 0xC0, 6), 8),
+        (_sp303_mask_l(b[6], 0x03, 2) | _sp303_mask_r(b[7], 0xC0, 6), 4),
+        (_sp303_mask_r(b[6], 0xFC, 2), 6),
+        (_sp303_mask_r(b[3], 0x0F, 0), 4),
+        (_sp303_mask_l(b[2], 0x0F, 4) | _sp303_mask_r(b[3], 0xF0, 4), 8),
+    ]
+    return [_sp303_shift_round_value(_sp303_sign_extend(val, bits), shift) for val, bits in raw]
 
 
 def _sp303_interp(a, b):
@@ -1627,9 +1812,19 @@ def _sp303_decode_mt1_playback(d0: int, block: bytes) -> List[int]:
         return [0] * 16
 
     pat_str, interp_func = pat_map[p]
-    out, max_depth = _sp303_apply_pattern(block, pat_str)
-    shift = (23 - max(1, max_depth)) - lut_val
-    _sp303_shift_round(out, shift)
+    explicit_pat = os.getenv("DR_SIDEKICK_RDAC_EXPLICIT_PAT") == "1"
+    if explicit_pat and pat_str == _SP303_PAT_B:
+        # decode.c PATTERN B uses explicit sign widths and fixed shift steps 6..11.
+        shift = 6 + p
+        out = _sp303_apply_pattern_b_explicit(block, shift)
+    elif explicit_pat and pat_str == _SP303_PAT_D:
+        # decode.c exposes one explicit PATTERN D layout with SHIFT_ROUND_8.
+        shift = 8
+        out = _sp303_apply_pattern_d_explicit(block, shift)
+    else:
+        out, max_depth = _sp303_apply_pattern(block, pat_str)
+        shift = (23 - max(1, max_depth)) - lut_val
+        _sp303_shift_round(out, shift)
     if interp_func:
         interp_func(d0, out)
     elif p == 30:
@@ -2500,13 +2695,13 @@ class SmartMediaLibrary:
         log.info("Imported SP0 files from %s to %s", source_dir, card_dir)
 
     def card_has_patterns(self, card_name: str) -> bool:
-        """Return True if PTNINFO0.SP0 in the card dir has any active pattern slots."""
-        ptninfo = self.cards_dir / card_name / "PTNINFO0.SP0"
-        if not ptninfo.exists():
+        """Return True if PTNDATA contains at least one non-empty serialized slot."""
+        ptndata_path = self.cards_dir / card_name / "PTNDATA0.SP0"
+        if not ptndata_path.exists():
             return False
         try:
-            data = ptninfo.read_bytes()
-            return any(data[i] == 0x04 for i in range(0, min(len(data), 64), 4))
+            ptndata = PTNData.from_file(ptndata_path)
+            return any(ptndata.slot_has_serialized_events(slot) for slot in range(SLOT_COUNT))
         except Exception:
             return False
 
@@ -2683,15 +2878,22 @@ def analyze_existing_card(smpinfo_path: Path) -> Dict:
     sample_slots = [str(slot) for slot in smpinfo.slots if not slot.is_empty]
 
     ptninfo_path = smpinfo_path.parent / "PTNINFO0.SP0"
+    ptndata_path = smpinfo_path.parent / "PTNDATA0.SP0"
     pattern_slots: List[str] = []
     active_count = 0
     if ptninfo_path.exists():
         ptninfo = PTNInfo.from_file(ptninfo_path)
-        active_count = sum(1 for slot in ptninfo.slots if slot.has_pattern)
+        ptndata = PTNData.from_file(ptndata_path) if ptndata_path.exists() else None
+        active_count = sum(
+            1
+            for slot in ptninfo.slots
+            if ptndata is not None and ptndata.slot_has_serialized_events(slot.pattern_index - 1 if slot.pattern_index else slot.slot_index)
+        )
         for slot in ptninfo.slots:
-            if slot.has_pattern:
+            storage_slot = slot.pattern_index - 1 if slot.pattern_index else slot.slot_index
+            if ptndata is not None and ptndata.slot_has_serialized_events(storage_slot):
                 pattern_slots.append(
-                    f"Slot {slot.slot_index:2d} (Bank {slot.bank.value} Pad {slot.pad}): {slot.quantize}"
+                    f"Slot {slot.slot_index:2d} (Bank {slot.bank.value} Pad {slot.pad}): {slot.length_bars} bar(s)"
                 )
 
     return {
@@ -2700,6 +2902,50 @@ def analyze_existing_card(smpinfo_path: Path) -> Dict:
         "pattern_active_count": active_count,
         "pattern_slots": pattern_slots,
         "ptninfo_exists": ptninfo_path.exists(),
+    }
+
+
+def inspect_ptndata_slot(path: Path, slot_index: int, tuple_count: int = 24) -> Dict[str, object]:
+    """Return raw tuple data for one PTNDATA slot without decoding assumptions."""
+    ptndata = PTNData.from_file(path)
+    raw = path.read_bytes()
+    slot_offset = ptndata.get_slot_offset(slot_index)
+    data_offset = slot_offset + 0x70
+    tuple_bytes = raw[data_offset:data_offset + (tuple_count * 6)]
+    tuples = []
+    for index in range(0, len(tuple_bytes), 6):
+        chunk = tuple_bytes[index:index + 6]
+        if len(chunk) < 6:
+            break
+        tuples.append({
+            "tuple_index": index // 6,
+            "offset": data_offset + index,
+            "hex": chunk.hex(),
+            "bytes": list(chunk),
+        })
+    return {
+        "slot_index": slot_index,
+        "slot_offset": slot_offset,
+        "data_offset": data_offset,
+        "tuples": tuples,
+    }
+
+
+def inspect_ptninfo_slot(path: Path, slot_index: int) -> Dict[str, object]:
+    """Return raw PTNINFO bytes and parsed slot metadata for one slot."""
+    ptninfo = PTNInfo.from_file(path)
+    raw = path.read_bytes()
+    start = slot_index * 4
+    slot = ptninfo.slots[slot_index]
+    return {
+        "slot_index": slot_index,
+        "raw_hex": raw[start:start + 4].hex(),
+        "has_pattern": slot.has_pattern,
+        "quantize": slot.quantize,
+        "length_bars": slot.length_bars,
+        "pattern_index": slot.pattern_index,
+        "bank": slot.bank.value,
+        "pad": slot.pad,
     }
 
 
