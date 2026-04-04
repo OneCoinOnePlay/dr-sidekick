@@ -361,11 +361,16 @@ class PianoRollCanvas(tk.Canvas):
 
         # Get coordinates
         x = self.tick_to_x(event.tick)
+        max_ticks = self.pattern_length_bars * 4 * INTERNAL_PPQN
+        end_x = self.tick_to_x(max_ticks)
         lane_index = PAD_ORDER.index(event.pad) if event.pad in PAD_ORDER else 0
         y = lane_index * self.zoom_y + ruler_height
 
         # Event width (minimum 8 pixels)
         event_width = max(8, self.zoom_x * 12)  # ~12 ticks wide
+        clipped_right = min(x + event_width, end_x)
+        if clipped_right <= x:
+            return
 
         # Get color based on pad
         color = self._get_event_color(event.pad, event.velocity)
@@ -375,7 +380,7 @@ class PianoRollCanvas(tk.Canvas):
         outline_width = 2 if selected else 1
 
         self.create_rectangle(
-            x, y + 2, x + event_width, y + self.zoom_y - 2,
+            x, y + 2, clipped_right, y + self.zoom_y - 2,
             fill=color,
             outline=outline_color,
             width=outline_width,
@@ -456,10 +461,12 @@ class PianoRollCanvas(tk.Canvas):
         # Match hit-test width to rendered event width.
         # Rendered width is max(8px, zoom_x*12px in tick-space), so convert to ticks.
         event_width_ticks = max(12.0, 8.0 / max(self.zoom_x, 1e-6))
+        max_ticks = self.pattern_length_bars * 4 * INTERNAL_PPQN
         for event in self.model.events:
             if event.pad == pad:
+                event_right_tick = min(max_ticks - 1, event.tick + event_width_ticks)
                 # Check if click is within the visual event block
-                if event.tick <= tick_raw <= (event.tick + event_width_ticks):
+                if event.tick <= tick_raw <= event_right_tick:
                     return event
         return None
 

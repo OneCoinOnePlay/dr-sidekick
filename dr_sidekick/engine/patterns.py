@@ -48,10 +48,11 @@ class PatternModel:
     Interfaces with the extracted PTNInfo/PTNData engine.
     """
 
-    def __init__(self):
+    def __init__(self, device_key: str = "sp303"):
         self.ptninfo: Optional[PTNInfo] = None
         self.ptndata: Optional[PTNData] = None
         self.ptninfo_raw: Optional[bytearray] = None
+        self.device_key = device_key
         self.current_slot: int = 0
         self.current_storage_slot: int = 0
         self.events: List[Event] = []
@@ -167,14 +168,26 @@ class PatternModel:
         bars = max(1, min(MAX_PATTERN_LENGTH_BARS, round(bars)))
         return max(1, bars * TICKS_PER_BAR)
 
+    def _bars_for_groove(self, groove: GrooveTemplate) -> int:
+        """Return the groove's authored or device-adjusted length in bars."""
+        groove_beats = groove.effective_beats_for_device(self.device_key)
+        if groove_beats <= 0:
+            groove_beats = groove.beats
+        return max(
+            1,
+            min(MAX_PATTERN_LENGTH_BARS, math.ceil(groove_beats / 4)),
+        )
+
     def get_pattern_length_bars(self) -> int:
         """Calculate pattern length in bars from events."""
+        ptninfo_length = self.get_ptninfo_length_bars(self.current_slot)
+        if ptninfo_length is not None and (
+            self.events or self.dirty or self.slot_has_pattern(self.current_slot)
+        ):
+            return ptninfo_length
+
         if not self.slot_has_pattern(self.current_slot):
             return DEFAULT_PATTERN_LENGTH_BARS
-
-        ptninfo_length = self.get_ptninfo_length_bars(self.current_slot)
-        if ptninfo_length is not None:
-            return ptninfo_length
 
         if not self.events:
             return DEFAULT_PATTERN_LENGTH_BARS
@@ -182,21 +195,25 @@ class PatternModel:
         return self._bars_for_events(self.events)
 
     def get_ptninfo_length_bars(self, slot_index: int) -> Optional[int]:
-        """Return per-slot length from PTNINFO active entry byte when available."""
+        """Return per-slot length from PTNINFO mapping bytes when available."""
         entry = self.get_ptninfo_entry(slot_index)
         if entry is None or len(entry) != 4:
             return None
         b0, b1, b2, _ = entry
+        if b0 == 0xB0 and b1 == 0x04 and 1 <= b2 <= MAX_PATTERN_LENGTH_BARS:
+            return b2
         if b0 == 0x04 and b1 == 0xB0 and 1 <= b2 <= MAX_PATTERN_LENGTH_BARS:
             return b2
         return None
 
     def get_ptninfo_quantize_display(self, slot_index: int) -> str:
-        """Best-effort quantize display from PTNINFO active entry byte."""
+        """Best-effort legacy quantize display from PTNINFO bytes."""
         entry = self.get_ptninfo_entry(slot_index)
         if entry is None or len(entry) != 4:
             return "Off"
         b0, b1, b2, b3 = entry
+        if b0 == 0xB0 and b1 == 0x04:
+            return "Off"
         if b0 != 0x04 or b1 != 0xB0:
             return "Off"
         if 1 <= b3 <= 16:
@@ -253,9 +270,13 @@ class PatternModel:
             return
         self.last_save_warning = None
 
-        length_bars = (
+        stored_length_bars = (
             self.get_ptninfo_length_bars(self.current_slot) or DEFAULT_PATTERN_LENGTH_BARS
         )
+        inferred_length_bars = (
+            self._bars_for_events(self.events) if self.events else DEFAULT_PATTERN_LENGTH_BARS
+        )
+        length_bars = max(stored_length_bars, inferred_length_bars)
         mapping_index = self.get_mapping_index(self.current_slot)
         if mapping_index is None:
             mapping_index = self.current_slot + 1
@@ -486,8 +507,14 @@ class PatternModel:
         """
         self.push_undo_state()
         self.last_stamp_warning = None
-        length_bars = (
+        current_length_bars = (
             self.get_ptninfo_length_bars(self.current_slot) or DEFAULT_PATTERN_LENGTH_BARS
+        )
+        groove_length_bars = self._bars_for_groove(groove)
+        length_bars = min(current_length_bars, groove_length_bars)
+        override_applied = (
+            groove.fallback_beats_for_device(self.device_key) is not None
+            and length_bars < current_length_bars
         )
         total_length_ticks = self._total_length_ticks_for_bars(length_bars)
         original_count = len(self.events)
@@ -520,7 +547,7 @@ class PatternModel:
         self.dirty = True
 
         warning_parts = []
-        if clipped_events > 0:
+        if clipped_events > 0 and not override_applied:
             warning_parts.append(
                 f"Removed {clipped_events} event(s) beyond the current {length_bars}-bar pattern length."
             )
@@ -734,7 +761,9 @@ class PatternModel:
     def set_current_slot_length_bars(self, bars: int):
         """Update PTNINFO length byte for current slot without altering mapping."""
         bars = max(1, min(MAX_PATTERN_LENGTH_BARS, round(bars)))
-        current_bars = self.get_pattern_length_bars()
+        current_bars = (
+            self.get_ptninfo_length_bars(self.current_slot) or DEFAULT_PATTERN_LENGTH_BARS
+        )
         if bars == current_bars:
             return
         self.push_undo_state()
@@ -758,28 +787,26 @@ class PatternModel:
     ):
         if self.ptninfo is None:
             return
-        self.ptninfo.set_pattern(slot_index, quantize)
+        bars = active_value if active_value is not None else DEFAULT_PATTERN_LENGTH_BARS
+        self.ptninfo.set_pattern(
+            slot_index,
+            quantize,
+            bars=bars,
+            pattern_index=mapping_index,
+        )
         if self.ptninfo_raw is None:
             return
-        quant_map = {
-            "OFF": 0x00,
-            "1/4": 0x01,
-            "1/8": 0x02,
-            "1/16": 0x03,
-            "1/8T": 0x04,
-            "1/16T": 0x05,
-        }
         if active_value is not None:
-            quant_byte = max(0, min(0x63, round(active_value)))
+            bars = max(1, min(0x63, round(active_value)))
         else:
-            quant_byte = quant_map.get(quantize, 0x00)
+            bars = DEFAULT_PATTERN_LENGTH_BARS
         if mapping_index is None:
             existing = self.get_mapping_index(slot_index)
             mapping_index = existing if existing is not None else (slot_index + 1)
         mapping_index = max(1, min(16, mapping_index))
         offset = slot_index * 4
         self.ptninfo_raw[offset:offset + 4] = bytes(
-            [0x04, 0xB0, quant_byte, mapping_index]
+            [0xB0, 0x04, bars, mapping_index]
         )
 
     def _set_ptninfo_empty_entry(self, slot_index: int):
@@ -799,7 +826,15 @@ class PatternModel:
         return bytes(self.ptninfo_raw[offset:offset + 4])
 
     def slot_has_pattern(self, slot_index: int) -> bool:
-        if self.ptninfo is None or not (0 <= slot_index < SLOT_COUNT):
+        if not (0 <= slot_index < SLOT_COUNT):
+            return False
+        if slot_index == self.current_slot and (self.events or self.dirty):
+            return True
+        if self.ptndata is not None:
+            mapping_index = self.get_mapping_index(slot_index)
+            storage_slot = (mapping_index - 1) if mapping_index is not None else slot_index
+            return self.ptndata.slot_has_serialized_events(storage_slot)
+        if self.ptninfo is None:
             return False
         return bool(self.ptninfo.slots[slot_index].has_pattern)
 
@@ -810,6 +845,8 @@ class PatternModel:
         b0, b1, b2, b3 = entry
         if b0 == 0xB0 and b1 == 0x04 and b2 == 0x02:
             return b3 if 1 <= b3 <= 16 else None
+        if b0 == 0xB0 and b1 == 0x04 and 1 <= b3 <= 16:
+            return b3
         if b0 == 0x04 and b1 == 0xB0 and 1 <= b3 <= 16:
             return b3
         return None

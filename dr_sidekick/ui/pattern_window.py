@@ -415,6 +415,13 @@ existing ones.
     timing feel (e.g. a steady 16th note hi-hat).
   - SP-303 capacity note: a pattern slot has a nominal 112-event cap,
     but dense timing can fit fewer once encoded for the hardware.
+  - Some 4-bar triplet and hybrid patterns from the Samples From Mars
+    library are too dense to fit the SP-303 at full length.
+  - For those cases, Dr. Sidekick automatically stamps a shorter
+    SP-303-friendly version so the groove fits cleanly on the device.
+  - The original full-length patterns are still preserved in the pack
+    library and are always available from Samples From Mars for use on
+    higher-capacity devices later.
   - If Stamp reports "too dense," shorten the pattern or reduce hits.
 
   This is undoable (Ctrl+Z).
