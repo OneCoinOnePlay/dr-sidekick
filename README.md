@@ -27,7 +27,8 @@
 - Copy/paste pattern slots, 50-level undo/redo
 - MIDI import with PPQN conversion; up to 16 files into consecutive slots in one operation
 - Apply SP-1200, MPC, Digitakt, or custom MIDI grooves
-- Hardware-verified byte-perfect output
+- SP-303-aware pattern handling: 2-bar default length, PTNINFO-backed slot mapping, 1-99 bar lengths, and hardware-style stepping above 20 bars
+- Preserves hardware-authored duplicate hits and overdub-oriented timing semantics during decode
 
 **SmartMedia Manager** — load a card setup, reassign pads, write changes back to the SmartMedia card
 
@@ -94,6 +95,14 @@ chmod +x Dr_Sidekick.py
 Beta. Core workflows are functional and have been tested against SP-303 hardware.
 
 Current release: `v0.7.4`
+
+Recent pattern work:
+
+- Pattern length now defaults to 2 bars to match SP-303 hardware
+- Length editing follows the SP-303 rule: 1-20 in single-bar steps, then 4-bar steps up to 99
+- PTNINFO bar-count and display-slot mapping are hardware-aligned
+- `07031100` decoding preserves overdub timing by treating zero-delta note tuples as repeated prior steps
+- Quantize changes are treated as in-stream PTNDATA state, not PTNINFO metadata
 
 RDAC audio decoding is experimental — samples are recognisable but noisy. Structural accuracy (pattern selection, bit extraction, hierarchical interpolation) is confirmed with 0.93 spectral correlation to hardware output.
 
