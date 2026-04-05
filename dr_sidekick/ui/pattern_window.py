@@ -57,7 +57,7 @@ class PatternSequencerWindow:
 
         # Calculate window height: toolbar (~40) + ruler (25) + 32 lanes + statusbar (~25) + padding
         window_height = 40 + 25 + (32 * 25) + 25 + 30  # ~920 pixels
-        self.root.geometry(f"1200x{window_height}")
+        self.root.geometry(f"1400x{window_height}")
 
         # Model
         self.model = PatternModel()
@@ -1193,7 +1193,10 @@ existing ones.
     def on_pattern_length_changed(self, event=None):
         """Handle pattern length change"""
         try:
-            bars = self.pattern_length_var.get()
+            requested_bars = self.pattern_length_var.get()
+            current_bars = self.model.get_pattern_length_bars()
+            bars = self.model.normalize_pattern_length_bars(requested_bars, current_bars)
+            self.pattern_length_var.set(bars)
             self.model.set_current_slot_length_bars(bars)
             self._sync_pattern_length_controls()
             self.update_status(f"Pattern Length: {bars} bars")
