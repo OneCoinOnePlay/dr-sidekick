@@ -29,6 +29,8 @@
 - Apply a selection of Grooves From Mars, with special thanks to Samples From Mars. You can also apply your own MIDI grooves
 - SP-303-aware pattern handling: 2-bar default length, PTNINFO-backed slot mapping, 1-99 bar lengths, and hardware-style stepping above 20 bars
 - Preserves hardware-authored duplicate hits and overdub-oriented timing semantics during decode
+- Hybrid pattern rendering: onset-only events display as occupied steps, while validated hardware Gate pairs can display as spans
+- Debug tuple inspection for hardware-derived patterns and unresolved tuple families
 
 **SmartMedia Manager** — load a card setup, reassign pads, write changes back to the SmartMedia card
 
@@ -94,7 +96,7 @@ chmod +x Dr_Sidekick.py
 
 Beta. Core workflows are functional and have been tested against SP-303 hardware.
 
-Current release: `v0.7.4`
+Current release: `v0.7.5`
 
 Recent pattern work:
 
@@ -103,6 +105,9 @@ Recent pattern work:
 - PTNINFO bar-count and display-slot mapping are hardware-aligned
 - `07031100` decoding preserves overdub timing by treating zero-delta note tuples as repeated prior steps
 - Quantize changes are treated as in-stream PTNDATA state, not PTNINFO metadata
+- Validated hardware Gate pairs (`A -> B` and `A -> C`) now decode as derived spans
+- Unresolved hardware tuple families are preserved and inspectable instead of being flattened into generic filler
+- Restore to Card now removes stale sample SP0 files while preserving destination pattern files unless the selected virtual card explicitly includes them
 
 RDAC audio decoding is experimental — samples are recognisable but noisy. Structural accuracy (pattern selection, bit extraction, hierarchical interpolation) is confirmed with 0.93 spectral correlation to hardware output.
 

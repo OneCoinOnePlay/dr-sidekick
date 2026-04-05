@@ -303,6 +303,9 @@ Step 3 — Program the pattern.
   Click pad rows to place hits. Drag to move. Right-click to delete.
   Set bar length with the Pattern Length spinner.
   Adjust velocity by selecting notes and using [ / ] keys.
+  The piano roll now uses a hybrid display: conventional patterns render
+  as occupied steps on the active grid, while validated hardware Gate
+  pairs can render as spans.
   Keep device limits in mind: the SP-303 has a nominal 112-event cap
   per pattern slot, but dense timing can fit fewer once encoded.
 
@@ -375,6 +378,9 @@ Step 5 — Write changes.
   In Sample Manager: Write Changes to Card.
   Eject safely and verify on device.
   If anything is wrong: SmartMedia Library -> Card -> Restore to Card.
+  Restore replaces sample/card audio files from the selected virtual card
+  and preserves destination PTNINFO0.SP0/PTNDATA0.SP0 unless that card
+  explicitly includes pattern files of its own.
 
 
 ─────────────────────────────────────────────────────────────
@@ -448,7 +454,20 @@ A: Most common causes:
 Q: How do I back up and restore a card?
 A: In the SmartMedia Library window, select the card and use Card -> Quick Backup.
    Backups are stored in Backup/ next to SmartMedia-Library. To restore, use
-   Card -> Restore to Card.
+   Card -> Restore to Card. Restore replaces sample/card audio SP0 files from
+   the selected virtual card and preserves destination PTNINFO0.SP0 /
+   PTNDATA0.SP0 unless the virtual card explicitly includes them.
+
+Q: Why does a hardware-derived Gate pattern warn before save?
+A: Some hardware-derived Gate/span structures can be decoded and displayed,
+   but the current writer still serializes onset/rest-oriented output.
+   The warning prevents accidentally flattening validated hardware behavior
+   into ordinary onset-only patterns.
+
+Q: Why do some patterns show spans instead of fixed note blocks?
+A: Dr. Sidekick now uses a hybrid pattern display. Ordinary patterns render
+   as occupied steps on the active grid. Only the currently validated
+   hardware Gate pair families are promoted into visible spans.
 
 Q: I used Convert MPC1000 Program and some pads say NOT FOUND.
 A: The .pgm stores sample names without file extensions, and matching is
