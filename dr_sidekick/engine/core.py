@@ -819,14 +819,7 @@ class PTNData:
         if len(tuples) < 2:
             return []
 
-        fill_tuple: Optional[bytes] = None
-        fill_idx: Optional[int] = None
-        for idx in range(len(tuples)):
-            tail = tuples[idx:idx + 8]
-            if len(tail) == 8 and len(set(tail)) == 1:
-                fill_tuple = tail[0]
-                fill_idx = idx
-                break
+        fill_idx = self._find_hardware_fill_run_start(tuples)
 
         events: List[Event] = []
         current_tick = 0
@@ -848,6 +841,21 @@ class PTNData:
             current_tick += delta
 
         return events
+
+    def _find_hardware_fill_run_start(self, tuples: List[bytes]) -> Optional[int]:
+        """Return the first repeated control-tuple run that marks tuple-zone fill."""
+        for idx in range(len(tuples)):
+            tail = tuples[idx:idx + 8]
+            if len(tail) < 8 or len(set(tail)) != 1:
+                continue
+
+            candidate = tail[0]
+            if candidate[5] != 0x80:
+                continue
+
+            return idx
+
+        return None
     
     @classmethod
     def from_file(cls, filepath: Path) -> 'PTNData':
