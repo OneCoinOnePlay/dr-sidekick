@@ -1044,7 +1044,7 @@ A: Quick Import does not alter the audio level of your WAV files. If samples
             preferred = Path("/Volumes/BOSS DATA")
             target = preferred if preferred.exists() else self.state.get_library_paths()["outgoing"]
             if not messagebox.askyesno("Restore to Card",
-                                       f"Restore '{card.name}' to:\n{target}\n\nThis will overwrite files. Continue?",
+                                       f"Restore '{card.name}' to:\n{target}\n\nThis replaces the card's existing .SP0 files with the virtual card contents. Continue?",
                                        parent=self.root):
                 return
             try:
