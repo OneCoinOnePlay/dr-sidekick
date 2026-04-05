@@ -355,6 +355,14 @@ class PianoRollCanvas(tk.Canvas):
         for event in self.model.events:
             self._draw_event(event, event in self.selected_events)
 
+    def _event_tick_span(self, event: Event) -> int:
+        """Return the rendered tick span for one event."""
+        if event.render_style == "span" and event.duration_ticks > 0:
+            return event.duration_ticks
+        if self.grid_snap > 0:
+            return max(1, self.grid_snap)
+        return INTERNAL_PPQN
+
     def _draw_event(self, event: Event, selected: bool):
         """Draw single event block"""
         ruler_height = 25
@@ -366,9 +374,9 @@ class PianoRollCanvas(tk.Canvas):
         lane_index = PAD_ORDER.index(event.pad) if event.pad in PAD_ORDER else 0
         y = lane_index * self.zoom_y + ruler_height
 
-        # Event width (minimum 8 pixels)
-        event_width = max(8, self.zoom_x * 12)  # ~12 ticks wide
-        clipped_right = min(x + event_width, end_x)
+        span_ticks = self._event_tick_span(event)
+        raw_right = self.tick_to_x(min(max_ticks, event.tick + span_ticks))
+        clipped_right = min(max(x + 8, raw_right), end_x)
         if clipped_right <= x:
             return
 
@@ -458,12 +466,13 @@ class PianoRollCanvas(tk.Canvas):
         tick_raw = round(self.canvasx(x) / self.zoom_x)
         pad = self.y_to_pad(y)
 
-        # Match hit-test width to rendered event width.
-        # Rendered width is max(8px, zoom_x*12px in tick-space), so convert to ticks.
-        event_width_ticks = max(12.0, 8.0 / max(self.zoom_x, 1e-6))
         max_ticks = self.pattern_length_bars * 4 * INTERNAL_PPQN
         for event in self.model.events:
             if event.pad == pad:
+                event_width_ticks = max(
+                    float(self._event_tick_span(event)),
+                    8.0 / max(self.zoom_x, 1e-6),
+                )
                 event_right_tick = min(max_ticks - 1, event.tick + event_width_ticks)
                 # Check if click is within the visual event block
                 if event.tick <= tick_raw <= event_right_tick:

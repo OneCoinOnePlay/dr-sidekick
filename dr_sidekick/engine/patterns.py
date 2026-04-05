@@ -39,6 +39,7 @@ class ModelState:
     slot: int
     events: List[Event]
     ptninfo_entry: Optional[bytes] = None
+    hardware_debug_tuples: Optional[list] = None
 
 
 class PatternModel:
@@ -65,6 +66,7 @@ class PatternModel:
         self.slot_clipboard: Optional[List[Event]] = None
         self.last_save_warning: Optional[str] = None
         self.last_stamp_warning: Optional[str] = None
+        self.hardware_debug_tuples = []
 
     def new_pattern(self):
         """Create new pattern files."""
@@ -82,6 +84,7 @@ class PatternModel:
             )
         self.current_slot = 0
         self.events = []
+        self.hardware_debug_tuples = []
         self.undo_stack.clear()
         self.redo_stack.clear()
         self.dirty = False
@@ -145,11 +148,13 @@ class PatternModel:
 
         if not self.slot_has_pattern(slot_index):
             self.events = []
+            self.hardware_debug_tuples = []
         elif self.ptndata is not None:
-            self.events = self.ptndata.decode_events(storage_slot)
+            self.events, self.hardware_debug_tuples = self.ptndata.decode_events_with_debug(storage_slot)
             self.events.sort(key=lambda event: event.tick)
         else:
             self.events = []
+            self.hardware_debug_tuples = []
 
     def _bars_for_events(self, events: List[Event]) -> int:
         """Return a deterministic 96 PPQN bar count for the current events."""
@@ -285,6 +290,54 @@ class PatternModel:
             "over_capacity": event_count > event_capacity or bytes_used > byte_capacity,
         }
 
+    def has_opaque_hardware_structure(self) -> bool:
+        """Return whether the current slot still carries unresolved hardware tuples."""
+        return bool(self.hardware_debug_tuples)
+
+    def get_hardware_debug_report(self) -> str:
+        """Build a conservative text report for the current slot's hardware tuples."""
+        if not self.hardware_debug_tuples:
+            return "No hardware tuple metadata is available for the current slot."
+
+        derived_pairs = {
+            event.source_tuple_indices
+            for event in self.events
+            if event.render_style == "span" and len(event.source_tuple_indices) == 2
+        }
+        tuple_to_pair = {
+            tuple_index: pair
+            for pair in derived_pairs
+            for tuple_index in pair
+        }
+
+        lines = [
+            f"Slot {self.current_slot + 1} hardware tuple inspection",
+            "",
+            "Validated decode rules:",
+            "- same-pad A -> B renders as a derived span",
+            "- same-pad A -> C renders as a derived span",
+            "- all other non-fill tuple families remain opaque",
+            "",
+            "Tuples:",
+        ]
+        for tuple_info in self.hardware_debug_tuples:
+            note = ""
+            pair = tuple_to_pair.get(tuple_info.tuple_index)
+            if pair is not None:
+                note = " derived-span tuple"
+            elif tuple_info.role == "control":
+                note = " opaque control"
+            else:
+                note = " opaque note-edge"
+            lines.append(
+                f"[{tuple_info.tuple_index:02d}] tick={tuple_info.tick:>4} "
+                f"pad=0x{tuple_info.pad:02X} delta={tuple_info.delta:>3} "
+                f"family={tuple_info.family:<6} prefix={tuple_info.prefix_hex} "
+                f"raw={tuple_info.raw_hex}{note}"
+            )
+
+        return "\n".join(lines)
+
     def save_slot(self):
         """Save current events to slot."""
         if self.ptndata is None or not self.dirty:
@@ -303,6 +356,11 @@ class PatternModel:
             mapping_index = self.current_slot + 1
 
         if self.events:
+            if self.has_opaque_hardware_structure():
+                self.last_save_warning = (
+                    "This pattern includes hardware-derived tuple structure that Dr. Sidekick can inspect "
+                    "but cannot author yet. Saving edited events will flatten those tuples into onset-only output."
+                )
             self.events.sort(key=lambda event: event.tick)
             total_length_ticks = self._total_length_ticks_for_bars(length_bars)
             fitted_events, truncated_events, fitted_total_length_ticks = (
@@ -349,6 +407,7 @@ class PatternModel:
         else:
             self.ptndata.clear_pattern(self.current_storage_slot)
             self._set_ptninfo_empty_entry(self.current_slot)
+            self.hardware_debug_tuples = []
         self.dirty = False
 
     def _fit_events_to_tuple_capacity(
@@ -409,12 +468,14 @@ class PatternModel:
         """Clear current slot."""
         self.push_undo_state()
         self.events.clear()
+        self.hardware_debug_tuples = []
         self._set_ptninfo_empty_entry(self.current_slot)
         self.dirty = True
 
     def add_event(self, tick: int, pad: int, velocity: int = 0x7F):
         """Add event to current slot."""
         self.push_undo_state()
+        self.hardware_debug_tuples = []
         self.events.append(Event(tick=tick, pad=pad, velocity=velocity))
         self.events.sort(key=lambda event: event.tick)
         self.dirty = True
@@ -423,6 +484,7 @@ class PatternModel:
         """Remove event from current slot."""
         self.push_undo_state()
         if event in self.events:
+            self.hardware_debug_tuples = []
             self.events.remove(event)
             self.dirty = True
 
@@ -431,6 +493,7 @@ class PatternModel:
         if not events:
             return
         self.push_undo_state()
+        self.hardware_debug_tuples = []
         for event in events:
             if event in self.events:
                 self.events.remove(event)
@@ -439,6 +502,7 @@ class PatternModel:
     def move_event(self, event: Event, new_tick: int, new_pad: Optional[int] = None):
         """Move event to new position."""
         self.push_undo_state()
+        self.hardware_debug_tuples = []
         event.tick = new_tick
         if new_pad is not None:
             event.pad = new_pad
@@ -448,6 +512,7 @@ class PatternModel:
     def set_event_velocity(self, event: Event, velocity: int):
         """Set velocity for event."""
         self.push_undo_state()
+        self.hardware_debug_tuples = []
         event.velocity = max(0, min(127, velocity))
         self.dirty = True
 
@@ -473,6 +538,7 @@ class PatternModel:
             return 0
 
         self.push_undo_state()
+        self.hardware_debug_tuples = []
         for event in candidates:
             event.pad = target_pad
         self.events.sort(key=lambda event: event.tick)
@@ -484,6 +550,7 @@ class PatternModel:
         if quantize_ticks <= 0:
             return
         self.push_undo_state()
+        self.hardware_debug_tuples = []
         for event in events:
             event.tick = round(event.tick / quantize_ticks) * quantize_ticks
         self.events.sort(key=lambda event: event.tick)
@@ -528,6 +595,7 @@ class PatternModel:
         """
         self.push_undo_state()
         self.last_stamp_warning = None
+        self.hardware_debug_tuples = []
         current_length_bars = (
             self.get_ptninfo_length_bars(self.current_slot) or DEFAULT_PATTERN_LENGTH_BARS
         )
@@ -600,17 +668,15 @@ class PatternModel:
 
     def copy_slot(self):
         """Copy current slot events to clipboard."""
-        self.slot_clipboard = [Event(event.tick, event.pad, event.velocity) for event in self.events]
+        self.slot_clipboard = [event.clone() for event in self.events]
 
     def paste_slot(self):
         """Paste clipboard events to current slot."""
         if self.slot_clipboard is None:
             return
         self.push_undo_state()
-        self.events = [
-            Event(event.tick, event.pad, event.velocity)
-            for event in self.slot_clipboard
-        ]
+        self.events = [event.clone() for event in self.slot_clipboard]
+        self.hardware_debug_tuples = []
         self._set_ptninfo_active_entry(self.current_slot, "OFF")
         self.dirty = True
 
@@ -653,7 +719,7 @@ class PatternModel:
         self.dirty = True
         self.current_slot = 0
         self.current_storage_slot = 0
-        self.events = self.ptndata.decode_events(0)
+        self.events, self.hardware_debug_tuples = self.ptndata.decode_events_with_debug(0)
         self.events.sort(key=lambda event: event.tick)
 
     def import_midi(
@@ -732,7 +798,7 @@ class PatternModel:
             candidate_events = imported_events
         else:
             candidate_events = [
-                Event(event.tick, event.pad, event.velocity)
+                event.clone()
                 for event in self.events
             ]
             candidate_events.extend(imported_events)
@@ -903,7 +969,7 @@ class PatternModel:
         else:
             self.current_storage_slot = self.current_slot
         if self.ptndata is not None:
-            self.events = self.ptndata.decode_events(self.current_storage_slot)
+            self.events, self.hardware_debug_tuples = self.ptndata.decode_events_with_debug(self.current_storage_slot)
             self.events.sort(key=lambda event: event.tick)
         self.dirty = True
 
@@ -911,8 +977,9 @@ class PatternModel:
         """Save current state to undo stack."""
         state = ModelState(
             slot=self.current_slot,
-            events=[Event(event.tick, event.pad, event.velocity) for event in self.events],
+            events=[event.clone() for event in self.events],
             ptninfo_entry=self.get_ptninfo_entry(self.current_slot),
+            hardware_debug_tuples=list(self.hardware_debug_tuples),
         )
         self.undo_stack.append(state)
         if len(self.undo_stack) > self.max_undo_states:
@@ -921,7 +988,8 @@ class PatternModel:
 
     def _restore_state(self, state: ModelState):
         """Restore event data and current-slot PTNINFO metadata from an undo snapshot."""
-        self.events = [Event(event.tick, event.pad, event.velocity) for event in state.events]
+        self.events = [event.clone() for event in state.events]
+        self.hardware_debug_tuples = list(state.hardware_debug_tuples or [])
         if state.slot != self.current_slot or state.ptninfo_entry is None or self.ptninfo_raw is None:
             self.dirty = True
             return
@@ -947,8 +1015,9 @@ class PatternModel:
 
         current = ModelState(
             slot=self.current_slot,
-            events=[Event(event.tick, event.pad, event.velocity) for event in self.events],
+            events=[event.clone() for event in self.events],
             ptninfo_entry=self.get_ptninfo_entry(self.current_slot),
+            hardware_debug_tuples=list(self.hardware_debug_tuples),
         )
         self.redo_stack.append(current)
 
@@ -963,8 +1032,9 @@ class PatternModel:
 
         current = ModelState(
             slot=self.current_slot,
-            events=[Event(event.tick, event.pad, event.velocity) for event in self.events],
+            events=[event.clone() for event in self.events],
             ptninfo_entry=self.get_ptninfo_entry(self.current_slot),
+            hardware_debug_tuples=list(self.hardware_debug_tuples),
         )
         self.undo_stack.append(current)
 
