@@ -168,6 +168,27 @@ class PatternModel:
         bars = max(1, min(MAX_PATTERN_LENGTH_BARS, round(bars)))
         return max(1, bars * TICKS_PER_BAR)
 
+    def normalize_pattern_length_bars(self, requested_bars: int, current_bars: int) -> int:
+        """Match the SP-303's pattern-length stepping above 20 bars."""
+        requested_bars = max(1, min(MAX_PATTERN_LENGTH_BARS, round(requested_bars)))
+        current_bars = max(1, min(MAX_PATTERN_LENGTH_BARS, round(current_bars)))
+
+        if requested_bars <= 20 or requested_bars == MAX_PATTERN_LENGTH_BARS:
+            return requested_bars
+
+        if requested_bars > current_bars:
+            snapped = 24 + max(0, ((requested_bars - 24 + 3) // 4)) * 4
+        elif requested_bars < current_bars:
+            if requested_bars < 24:
+                return 20
+            snapped = 24 + max(0, ((requested_bars - 24) // 4)) * 4
+        else:
+            snapped = requested_bars
+
+        if snapped > 96:
+            return MAX_PATTERN_LENGTH_BARS
+        return max(24, snapped)
+
     def _bars_for_groove(self, groove: GrooveTemplate) -> int:
         """Return the groove's authored or device-adjusted length in bars."""
         groove_beats = groove.effective_beats_for_device(self.device_key)
@@ -760,10 +781,10 @@ class PatternModel:
 
     def set_current_slot_length_bars(self, bars: int):
         """Update PTNINFO length byte for current slot without altering mapping."""
-        bars = max(1, min(MAX_PATTERN_LENGTH_BARS, round(bars)))
         current_bars = (
             self.get_ptninfo_length_bars(self.current_slot) or DEFAULT_PATTERN_LENGTH_BARS
         )
+        bars = self.normalize_pattern_length_bars(bars, current_bars)
         if bars == current_bars:
             return
         self.push_undo_state()
@@ -787,7 +808,11 @@ class PatternModel:
     ):
         if self.ptninfo is None:
             return
-        bars = active_value if active_value is not None else DEFAULT_PATTERN_LENGTH_BARS
+        if active_value is not None:
+            current_bars = self.get_ptninfo_length_bars(slot_index) or DEFAULT_PATTERN_LENGTH_BARS
+            bars = self.normalize_pattern_length_bars(active_value, current_bars)
+        else:
+            bars = DEFAULT_PATTERN_LENGTH_BARS
         self.ptninfo.set_pattern(
             slot_index,
             quantize,
@@ -797,7 +822,7 @@ class PatternModel:
         if self.ptninfo_raw is None:
             return
         if active_value is not None:
-            bars = max(1, min(0x63, round(active_value)))
+            bars = max(1, min(0x63, round(bars)))
         else:
             bars = DEFAULT_PATTERN_LENGTH_BARS
         if mapping_index is None:
