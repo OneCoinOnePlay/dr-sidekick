@@ -22,11 +22,11 @@
 
 - 32 pad lanes across Banks A, B, C & D
 - Draw, Select, and Erase editing modes
-- Grid snapping: Free, 1/4, 1/8, 1/16, 1/32
+- Grid snapping: Off, 4, 8, 8-3, 16
 - Multi-select, velocity editing, and quantize
 - Copy/paste pattern slots, 50-level undo/redo
 - MIDI import with PPQN conversion; up to 16 files into consecutive slots in one operation
-- Apply SP-1200, MPC, Digitakt, or custom MIDI grooves
+- Apply a selection of Grooves From Mars, with special thanks to Samples From Mars. You can also apply your own MIDI grooves
 - SP-303-aware pattern handling: 2-bar default length, PTNINFO-backed slot mapping, 1-99 bar lengths, and hardware-style stepping above 20 bars
 - Preserves hardware-authored duplicate hits and overdub-oriented timing semantics during decode
 
