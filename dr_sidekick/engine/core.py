@@ -627,23 +627,26 @@ class PTNData:
                 f"(max {max_serialized_len}, reserving {TUPLE_ZONE_SENTINEL_BYTES} bytes for the end marker)"
             )
         self.data[data_offset:data_offset+len(serialized)] = serialized
-        sentinel_tuple = bytes([0xFF, 0x80, 0x00, 0x00, 0x00, 0x00])
-        sentinel_offset = data_offset + len(serialized)
-        self.data[sentinel_offset:sentinel_offset + TUPLE_ZONE_SENTINEL_BYTES] = sentinel_tuple
         
         # Clear/fill only the tuple payload zone.
         #
         # Hardware captures show a fixed trailer beginning at slot+0x272.
         # Zeroing beyond this boundary destroys trailer metadata and causes
         # loop-length behavior regressions on device.
-        clear_offset = sentinel_offset + TUPLE_ZONE_SENTINEL_BYTES
+        clear_offset = data_offset + len(serialized)
 
         # Use the slot's native fill tuple so we preserve on-card semantics
-        # after the explicit end marker:
+        # immediately after the event stream:
         #   ff 80 00 00 10 00   (common)
-        #   ff 80 00 00 00 00   (also observed)
+        #   ff 80 00 00 00 00   (captured as an end marker, avoid writing it
+        #                        as the first post-stream tuple)
         fill_tuple = bytes(self.data[slot_offset + 0x74:slot_offset + 0x7A])
-        if len(fill_tuple) != 6 or fill_tuple[0] != 0xFF or fill_tuple[1] != 0x80:
+        if (
+            len(fill_tuple) != 6
+            or fill_tuple[0] != 0xFF
+            or fill_tuple[1] != 0x80
+            or fill_tuple == bytes([0xFF, 0x80, 0x00, 0x00, 0x00, 0x00])
+        ):
             fill_tuple = bytes([0xFF, 0x80, 0x00, 0x00, 0x10, 0x00])
 
         while clear_offset + 6 <= tuple_zone_end:
@@ -793,6 +796,7 @@ class PTNData:
         offset = data_offset + 10
         events: List[Event] = []
         current_tick = 0
+        previous_note_delta = INTERNAL_PPQN // 4
 
         for i in range(200):  # Increased limit to handle rest events
             if offset + 6 > len(self.data):
@@ -835,7 +839,19 @@ class PTNData:
             if velocity > 0:
                 events.append(Event(tick=current_tick, pad=pad, velocity=velocity))
 
-            current_tick += delta
+            step = delta
+            if marker == bytes([0x07, 0x03, 0x11, 0x00]):
+                # Captured SP-303 overdubbed patterns use zero-delta note tuples
+                # to mean "repeat the previous note step", not "same tick".
+                # Preserving that interpretation keeps hardware-recorded duplicate
+                # hits spread across the expected bar length instead of collapsing
+                # them into a shortened pattern in the editor.
+                if delta == 0:
+                    step = previous_note_delta
+                else:
+                    previous_note_delta = delta
+
+            current_tick += step
             offset += 6
 
         return events
