@@ -2853,6 +2853,13 @@ def find_wav_files(wav_dir: Path, recursive: bool = False) -> List[Path]:
     return sorted(wav_files, key=lambda path: str(path).lower())
 
 
+def _describe_wav_import_error(exc: Exception) -> str:
+    message = str(exc)
+    if isinstance(exc, wave.Error) and "unknown format: 3" in message:
+        return "unsupported WAV encoding: IEEE float (format 3). Convert to PCM WAV first."
+    return message
+
+
 def quick_import(wav_dir: Path, output_dir: Path, groove_file: Optional[Path] = None) -> Dict:
     wav_files = find_wav_files(wav_dir, recursive=True)
     if not wav_files:
@@ -2894,7 +2901,7 @@ def quick_import(wav_dir: Path, output_dir: Path, groove_file: Optional[Path] = 
         try:
             conversion_actions = prep._prepare_wav(wav_file, target_path)
         except Exception as exc:
-            results["errors"].append(f"Skipped {wav_file.name}: {exc}")
+            results["errors"].append(f"Skipped {wav_file.name}: {_describe_wav_import_error(exc)}")
             continue
 
         entry = {

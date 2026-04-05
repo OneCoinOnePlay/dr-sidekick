@@ -32,7 +32,10 @@ class QuickImportTests(unittest.TestCase):
             self.assertEqual(payload["skipped_count"], 1)
             self.assertEqual(len(payload["results"]["wav_prepared"]), 2)
             self.assertEqual(len(payload["results"]["errors"]), 1)
-            self.assertIn("Skipped bad.wav: unknown format: 3", payload["results"]["errors"])
+            self.assertIn(
+                "Skipped bad.wav: unsupported WAV encoding: IEEE float (format 3). Convert to PCM WAV first.",
+                payload["results"]["errors"],
+            )
             self.assertTrue((output_dir / "SMPL0001.WAV").exists())
             self.assertTrue((output_dir / "SMPL0002.WAV").exists())
 
