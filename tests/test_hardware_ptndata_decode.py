@@ -197,6 +197,53 @@ class HardwarePTNDataDecodeTests(unittest.TestCase):
 
         self.assertEqual([(e.tick, e.pad) for e in events], [(0, 0x10), (96, 0x10), (192, 0x10), (288, 0x10)])
 
+    def test_decodes_07031100_header_stream_as_legacy_pattern(self):
+        ptndata = PTNData()
+        slot_offset = ptndata.get_slot_offset(2)
+        data_offset = slot_offset + 0x70
+        payload = bytes.fromhex(
+            "11000000008007031100"
+            "00107f000000"
+            "00107f000000"
+            "18107f000100"
+            "18107f000000"
+            "18107f000000"
+            "18107f000000"
+            "18107f000000"
+            "18107f000000"
+            "18107f000000"
+            "18107f000000"
+            "18107f000000"
+            "18107f000000"
+            "0f107f000000"
+            "098007031100"
+            "18107f000000"
+            "18107f000100"
+            "18107f000000"
+            "18107f030000"
+            "18107f000000"
+            "18107f000000"
+            "18107f000100"
+            "18107f000000"
+            "30107f000000"
+            "06107f000000"
+            "ff8007031100"
+        )
+        ptndata.data[data_offset:data_offset + len(payload)] = payload
+
+        events = ptndata.decode_events(2)
+
+        self.assertEqual(
+            [(e.tick, e.pad) for e in events],
+            [
+                (0, 0x10), (0, 0x10), (0, 0x10), (24, 0x10), (48, 0x10),
+                (72, 0x10), (96, 0x10), (120, 0x10), (144, 0x10), (168, 0x10),
+                (192, 0x10), (216, 0x10), (240, 0x10), (264, 0x10), (288, 0x10),
+                (312, 0x10), (336, 0x10), (360, 0x10), (384, 0x10), (408, 0x10),
+                (432, 0x10), (456, 0x10), (504, 0x10),
+            ],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

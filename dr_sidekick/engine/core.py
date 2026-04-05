@@ -38,6 +38,11 @@ SLOT_SIZE = 0x400
 INTERNAL_PPQN = 96
 TICKS_PER_BAR = 4 * INTERNAL_PPQN
 MAX_PATTERN_EVENT_CAPACITY = 112
+LEGACY_PATTERN_MARKERS = {
+    bytes([0x04, 0x03, 0x16, 0x00]),
+    bytes([0x07, 0x03, 0x06, 0x00]),
+    bytes([0x07, 0x03, 0x11, 0x00]),
+}
 
 # Quantize values
 QUANTIZE_VALUES = {
@@ -516,13 +521,33 @@ class PTNData:
             else:
                 # Last event - calculate loop delta
                 if total_length_ticks is not None:
-                    total_delta = max(1, total_length_ticks - event.tick)
+                    total_delta = max(0, total_length_ticks - event.tick)
                 else:
                     total_delta = self._calculate_last_event_delta(events)
 
             # If delta > 255, insert rest events to span the gap
             remaining_delta = total_delta
             current_event = event
+
+            # When the final loop-closing delay is carried by a dedicated rest
+            # tuple, hardware preserves the last audible hit more reliably than
+            # when that entire delay is embedded in the final note tuple.
+            if (
+                i == len(events) - 1
+                and total_length_ticks is not None
+                and remaining_delta > 0
+            ):
+                data.extend([
+                    0x00,
+                    current_event.pad & 0xFF,
+                    current_event.velocity & 0xFF,
+                    0x00, 0x00, 0x00
+                ])
+                while remaining_delta > 0:
+                    chunk = min(255, remaining_delta)
+                    data.extend([chunk & 0xFF, 0x80, 0x10, 0x00, 0x00, 0x00])
+                    remaining_delta -= chunk
+                continue
 
             # Zero-delta events are valid and required for polyphonic notes
             # that start on the same tick. They must still emit one tuple.
@@ -751,7 +776,7 @@ class PTNData:
         Decode events from one PTNDATA storage slot.
 
         Two layouts are supported:
-        - Legacy app-authored stream: header + 04031600 marker + 6-byte events
+        - Legacy/header stream: header + captured marker variant + 6-byte events
         - Hardware-authored stream: 6-byte tuples where timing/pad live in bytes 4-5
         """
         slot_offset = self.get_slot_offset(slot_index)
@@ -759,12 +784,12 @@ class PTNData:
         tuple_zone_end = min(len(self.data), slot_offset + 0x272)
 
         marker = bytes(self.data[data_offset + 6:data_offset + 10])
-        if marker == bytes([0x04, 0x03, 0x16, 0x00]):
-            return self._decode_legacy_events(data_offset)
+        if marker in LEGACY_PATTERN_MARKERS:
+            return self._decode_legacy_events(data_offset, marker)
         return self._decode_hardware_events(data_offset, tuple_zone_end)
 
-    def _decode_legacy_events(self, data_offset: int) -> List[Event]:
-        """Decode the legacy app-authored header + marker event stream."""
+    def _decode_legacy_events(self, data_offset: int, marker: bytes) -> List[Event]:
+        """Decode header+marker legacy streams captured from app and hardware workflows."""
         offset = data_offset + 10
         events: List[Event] = []
         current_tick = 0
@@ -787,9 +812,15 @@ class PTNData:
             special2 = event_bytes[5]
 
             # Handle control/rest stream (pad=0x80).
-            # End/fill markers use FF 80 with velocity 0x00; timing rests use velocity 0x10.
+            # End/fill markers use FF 80 plus either:
+            # - 00 00 00 00 (classic app-authored tail)
+            # - the 4-byte header marker itself (captured 0703xxxx hardware tail)
+            # Timing rests use velocity 0x10 or shorter deltas.
             if pad == 0x80:
-                if delta == 0xFF and velocity == 0x00 and flags == 0x00:
+                if delta == 0xFF and (
+                    velocity == 0x00
+                    or bytes([velocity, flags, special1, special2]) == marker
+                ):
                     break
                 # Timing rest - advance time but don't add a note event.
                 current_tick += delta
