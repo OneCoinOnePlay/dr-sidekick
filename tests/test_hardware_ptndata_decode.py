@@ -144,6 +144,41 @@ class HardwarePTNDataDecodeTests(unittest.TestCase):
         self.assertGreaterEqual(len(events), 2)
         self.assertTrue(all(event.pad == 0x19 for event in events))
 
+    def test_repeated_hardware_tuples_do_not_trigger_false_fill_detection(self):
+        ptndata = self._ptndata_with_slot(
+            3,
+            [
+                "000000000080",
+                "000000000110",
+                "000000000110",
+                "000000000110",
+                "000000000110",
+                "000000000110",
+                "000000000110",
+                "000000000110",
+                "000000000110",
+                "000000000211",
+                "00000000ff80",
+            ],
+        )
+
+        events = ptndata.decode_events(3)
+
+        self.assertEqual(
+            [(event.tick, event.pad) for event in events],
+            [
+                (0, 0x10),
+                (1, 0x10),
+                (2, 0x10),
+                (3, 0x10),
+                (4, 0x10),
+                (5, 0x10),
+                (6, 0x10),
+                (7, 0x10),
+                (8, 0x11),
+            ],
+        )
+
     def test_decodes_legacy_app_authored_pattern(self):
         ptndata = PTNData()
         slot_offset = ptndata.get_slot_offset(0)
