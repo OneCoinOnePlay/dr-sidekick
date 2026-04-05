@@ -93,7 +93,7 @@ chmod +x Dr_Sidekick.py
 
 Beta. Core workflows are functional and have been tested against SP-303 hardware.
 
-Current release: `v0.7.0`
+Current release: `v0.7.4`
 
 RDAC audio decoding is experimental — samples are recognisable but noisy. Structural accuracy (pattern selection, bit extraction, hierarchical interpolation) is confirmed with 0.93 spectral correlation to hardware output.
 
