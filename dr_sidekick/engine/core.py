@@ -2992,7 +2992,7 @@ def inspect_ptninfo_slot(path: Path, slot_index: int) -> Dict[str, object]:
 # Constants
 INTERNAL_PPQN = 96
 SLOT_COUNT = 16
-DEFAULT_PATTERN_LENGTH_BARS = 4  # Default pattern length
+DEFAULT_PATTERN_LENGTH_BARS = 2  # Hardware-default pattern length
 MAX_PATTERN_LENGTH_BARS = 99  # SP-303 hardware maximum
 TUPLE_ZONE_MAX_BYTES = 0x272 - 0x70  # PTNDATA event payload capacity per pattern slot
 TUPLE_ZONE_SENTINEL_BYTES = 6  # Reserve one fill/end tuple so decoding stops inside the tuple zone.
