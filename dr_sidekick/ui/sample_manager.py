@@ -137,7 +137,10 @@ def run_quick_import(host: SampleManagerHost) -> None:
     try:
         archive_dir = archive_existing_outgoing_wavs(output_dir)
         payload = quick_import(wav_dir_path, output_dir, None)
-        summary_lines = [f"WAV files processed: {payload['imported_count']}"]
+        summary_lines = [
+            f"WAV files processed: {payload['imported_count']}",
+            f"WAV files skipped: {payload['skipped_count']}",
+        ]
         if archive_dir is not None:
             summary_lines.append(
                 f"Archived existing WAV files in BOSS DATA_OUTGOING to Cards/BOSS DATA_OUTGOING/{archive_dir.name}"
@@ -162,6 +165,13 @@ def run_quick_import(host: SampleManagerHost) -> None:
                 target_name = item.get("file")
                 if source_name and target_name:
                     summary_lines.append(f"Converted {source_name} -> {target_name}")
+        error_lines = payload["results"].get("errors", [])
+        if error_lines:
+            summary_lines.append("")
+            summary_lines.append(f"Skipped/failed WAVs: {len(error_lines)}")
+            summary_lines.extend(error_lines[:12])
+            if len(error_lines) > 12:
+                summary_lines.append(f"... and {len(error_lines) - 12} more")
         show_prepare_results(
             host.root,
             payload["results"],
