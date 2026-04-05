@@ -185,6 +185,7 @@ class PatternSequencerWindow:
         edit_menu.add_command(label="Exchange Patterns...", command=self.on_exchange_slots)
         if self.debug_mode:
             edit_menu.add_separator()
+            edit_menu.add_command(label="Inspect Hardware Tuples...", command=self.on_inspect_hardware_tuples)
             edit_menu.add_command(label="Generate Test Data...", command=self.on_generate_test_data)
 
         # View menu
@@ -1027,6 +1028,11 @@ existing ones.
                 self.model.last_save_warning = None
         except Exception as e:
             messagebox.showerror("Error", f"Failed to save pattern: {e}")
+
+    def on_inspect_hardware_tuples(self):
+        """Show conservative raw tuple inspection for the current slot."""
+        report = self.model.get_hardware_debug_report()
+        show_text_dialog(self.root, "Hardware Tuple Inspection", report, "980x620")
 
     def on_exit(self):
         """Close the Pattern Sequencer and return focus to the Library."""

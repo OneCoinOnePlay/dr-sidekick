@@ -66,6 +66,38 @@ class Event:
     tick: int
     pad: int
     velocity: int = 0x7F
+    duration_ticks: int = 0
+    render_style: str = "step"
+    source_tuple_indices: Tuple[int, ...] = ()
+
+    def clone(self) -> "Event":
+        return deepcopy(self)
+
+
+@dataclass(frozen=True)
+class HardwareTuple:
+    """Conservative inspection view for one hardware tuple."""
+    tuple_index: int
+    tick: int
+    raw_hex: str
+    prefix_hex: str
+    delta: int
+    pad: int
+    family: str
+    role: str
+
+
+HARDWARE_TUPLE_FAMILIES = {
+    "ff030000": "A",
+    "7f001b00": "B",
+    "7f002e00": "C",
+    "7f002000": "D",
+    "7f003b00": "E",
+    "7f008301": "F",
+    "7f00a904": "G",
+    "7f000e00": "H",
+}
+VALIDATED_SPAN_FAMILIES = {"B", "C"}
 
 
 @dataclass
@@ -789,6 +821,21 @@ class PTNData:
         marker = bytes(self.data[data_offset + 6:data_offset + 10])
         if marker in LEGACY_PATTERN_MARKERS:
             return self._decode_legacy_events(data_offset, marker)
+        events, _ = self._decode_hardware_events(data_offset, tuple_zone_end)
+        return events
+
+    def decode_events_with_debug(
+        self,
+        slot_index: int,
+    ) -> Tuple[List[Event], List[HardwareTuple]]:
+        """Decode one slot and return conservative hardware tuple metadata when present."""
+        slot_offset = self.get_slot_offset(slot_index)
+        data_offset = slot_offset + 0x70
+        tuple_zone_end = min(len(self.data), slot_offset + 0x272)
+
+        marker = bytes(self.data[data_offset + 6:data_offset + 10])
+        if marker in LEGACY_PATTERN_MARKERS:
+            return self._decode_legacy_events(data_offset, marker), []
         return self._decode_hardware_events(data_offset, tuple_zone_end)
 
     def _decode_legacy_events(self, data_offset: int, marker: bytes) -> List[Event]:
@@ -856,26 +903,44 @@ class PTNData:
 
         return events
 
-    def _decode_hardware_events(self, data_offset: int, tuple_zone_end: int) -> List[Event]:
-        """Decode hardware-authored tuples using the captured timing/pad layout."""
+    def _decode_hardware_events(
+        self,
+        data_offset: int,
+        tuple_zone_end: int,
+    ) -> Tuple[List[Event], List[HardwareTuple]]:
+        """Decode hardware-authored tuples while preserving unresolved tuple identity."""
         tuples = [
             bytes(self.data[offset:offset + 6])
             for offset in range(data_offset, tuple_zone_end, 6)
             if offset + 6 <= len(self.data)
         ]
         if len(tuples) < 2:
-            return []
+            return [], []
 
         fill_idx = self._find_hardware_fill_run_start(tuples)
-
-        events: List[Event] = []
+        parsed: List[HardwareTuple] = []
         current_tick = 0
         for idx, tuple_bytes in enumerate(tuples):
             if fill_idx is not None and idx >= fill_idx:
                 break
 
+            prefix_hex = tuple_bytes[:4].hex()
             delta = tuple_bytes[4]
             pad = tuple_bytes[5]
+            family = HARDWARE_TUPLE_FAMILIES.get(prefix_hex, "opaque")
+            role = "control" if pad == 0x80 else "note-edge"
+            parsed.append(
+                HardwareTuple(
+                    tuple_index=idx,
+                    tick=current_tick,
+                    raw_hex=tuple_bytes.hex(),
+                    prefix_hex=prefix_hex,
+                    delta=delta,
+                    pad=pad,
+                    family=family,
+                    role=role,
+                )
+            )
 
             if pad == 0x80:
                 current_tick += delta
@@ -883,11 +948,47 @@ class PTNData:
 
             if not (0x00 <= pad <= 0x1F):
                 break
-
-            events.append(Event(tick=current_tick, pad=pad, velocity=0x7F))
             current_tick += delta
 
-        return events
+        events: List[Event] = []
+        consumed_tuple_indices: set[int] = set()
+        for idx, tuple_info in enumerate(parsed):
+            if tuple_info.role != "note-edge" or tuple_info.tuple_index in consumed_tuple_indices:
+                continue
+
+            next_tuple = parsed[idx + 1] if idx + 1 < len(parsed) else None
+            if (
+                next_tuple is not None
+                and next_tuple.role == "note-edge"
+                and tuple_info.pad == next_tuple.pad
+                and tuple_info.family == "A"
+                and next_tuple.family in VALIDATED_SPAN_FAMILIES
+                and next_tuple.tick > tuple_info.tick
+            ):
+                events.append(
+                    Event(
+                        tick=tuple_info.tick,
+                        pad=tuple_info.pad,
+                        velocity=0x7F,
+                        duration_ticks=next_tuple.tick - tuple_info.tick,
+                        render_style="span",
+                        source_tuple_indices=(tuple_info.tuple_index, next_tuple.tuple_index),
+                    )
+                )
+                consumed_tuple_indices.add(next_tuple.tuple_index)
+                continue
+
+            events.append(
+                Event(
+                    tick=tuple_info.tick,
+                    pad=tuple_info.pad,
+                    velocity=0x7F,
+                    render_style="step",
+                    source_tuple_indices=(tuple_info.tuple_index,),
+                )
+            )
+
+        return events, parsed
 
     def _find_hardware_fill_run_start(self, tuples: List[bytes]) -> Optional[int]:
         """Return the first repeated control-tuple run that marks tuple-zone fill."""
