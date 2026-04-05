@@ -2761,12 +2761,34 @@ class SmartMediaLibrary:
             return False
 
     def restore_card(self, card_name: str, target_dir: Path):
-        """Copy SP0 files from card dir to target_dir (e.g. physical card)."""
+        """Restore card SP0 contents while preserving patterns unless provided."""
         card_dir = self.cards_dir / card_name
         target_dir.mkdir(parents=True, exist_ok=True)
-        for f in sorted(card_dir.glob("*.SP0")):
+        source_files = sorted(card_dir.glob("*.SP0"))
+        source_names = {f.name for f in source_files}
+        protected_names = {"PTNINFO0.SP0", "PTNDATA0.SP0"}
+
+        removed_count = 0
+        for existing in sorted(target_dir.glob("*.SP0")):
+            if existing.name in protected_names and existing.name not in source_names:
+                continue
+            if existing.name in source_names:
+                continue
+            existing.unlink()
+            removed_count += 1
+
+        copied_count = 0
+        for f in source_files:
             shutil.copy(f, target_dir / f.name)
-        log.info("Restored %s to %s", card_name, target_dir)
+            copied_count += 1
+
+        log.info(
+            "Restored %s to %s (%d copied, %d removed)",
+            card_name,
+            target_dir,
+            copied_count,
+            removed_count,
+        )
 
 
 class AssignmentSession:
@@ -2838,9 +2860,6 @@ def quick_import(wav_dir: Path, output_dir: Path, groove_file: Optional[Path] = 
 
     prep = SP303CardPrep()
     per_bank_limit = 8
-    batches: List[List[Path]] = [
-        wav_files[idx:idx + per_bank_limit] for idx in range(0, len(wav_files), per_bank_limit)
-    ]
     use_batch_dirs = len(wav_files) > per_bank_limit
 
     assignments = []
@@ -2853,41 +2872,59 @@ def quick_import(wav_dir: Path, output_dir: Path, groove_file: Optional[Path] = 
         "errors": [],
     }
     batch_dirs: List[str] = []
+    imported_count = 0
 
-    for batch_index, batch_files in enumerate(batches, start=1):
+    for wav_file in wav_files:
+        batch_index = (imported_count // per_bank_limit) + 1
+        slot_in_batch = (imported_count % per_bank_limit) + 1
+
         if use_batch_dirs:
-            batch_dir = output_dir / f"BANK_LOAD_{batch_index:02d}"
+            batch_dir_name = f"BANK_LOAD_{batch_index:02d}"
+            batch_dir = output_dir / batch_dir_name
             batch_dir.mkdir(parents=True, exist_ok=True)
-            batch_dirs.append(batch_dir.name)
+            if batch_dir_name not in batch_dirs:
+                batch_dirs.append(batch_dir_name)
         else:
             batch_dir = output_dir
 
-        for smpl_index, wav_file in enumerate(batch_files, start=1):
-            target_name = f"SMPL{smpl_index:04d}.WAV"
-            target_path = batch_dir / target_name
+        target_name = f"SMPL{slot_in_batch:04d}.WAV"
+        target_path = batch_dir / target_name
+        display_target = f"{batch_dir.name}/{target_name}" if use_batch_dirs else target_name
+
+        try:
             conversion_actions = prep._prepare_wav(wav_file, target_path)
-            display_target = f"{batch_dir.name}/{target_name}" if use_batch_dirs else target_name
+        except Exception as exc:
+            results["errors"].append(f"Skipped {wav_file.name}: {exc}")
+            continue
 
-            entry = {
-                "file": display_target,
-                "source_file": wav_file.name,
-            }
-            if conversion_actions:
-                entry["conversion_summary"] = (
-                    f"Converted {wav_file.name} -> {display_target}, {', '.join(conversion_actions)}"
-                )
-            results["wav_prepared"].append(entry)
-
-            assignments.append(
-                {
-                    "batch": batch_index,
-                    "slot_in_batch": smpl_index,
-                    "file": wav_file.name,
-                    "target": display_target,
-                }
+        entry = {
+            "file": display_target,
+            "source_file": wav_file.name,
+        }
+        if conversion_actions:
+            entry["conversion_summary"] = (
+                f"Converted {wav_file.name} -> {display_target}, {', '.join(conversion_actions)}"
             )
+        results["wav_prepared"].append(entry)
 
-    if len(batches) > 1:
+        assignments.append(
+            {
+                "batch": batch_index,
+                "slot_in_batch": slot_in_batch,
+                "file": wav_file.name,
+                "target": display_target,
+            }
+        )
+        imported_count += 1
+
+    if imported_count == 0:
+        error_preview = "\n".join(results["errors"][:5])
+        raise ValueError(
+            "No compatible WAV files could be imported."
+            + (f"\n{error_preview}" if error_preview else "")
+        )
+
+    if imported_count > per_bank_limit:
         results["warnings"].append(
             "Prepared multiple bank-load folders. Import one folder at a time on the SP-303."
         )
@@ -2898,9 +2935,9 @@ def quick_import(wav_dir: Path, output_dir: Path, groove_file: Optional[Path] = 
         "results": results,
         "assignments": assignments,
         "total_found": len(wav_files),
-        "imported_count": len(wav_files),
-        "skipped_count": 0,
-        "batch_count": len(batches),
+        "imported_count": imported_count,
+        "skipped_count": len(wav_files) - imported_count,
+        "batch_count": len(batch_dirs) if batch_dirs else 1,
         "batch_dirs": batch_dirs,
     }
 
