@@ -38,7 +38,7 @@
 - Auto-pad samples to 110ms minimum
 - Reassign archived .SP0 samples to different pads
 - Mix archived samples with new imports
-- Preview archived SP0 samples with experimental RDAC decoding
+- Preview archived SP0 samples and convert them to WAV with the solved RDAC codec (STANDARD, LONG, and LO-FI modes)
 - Convert SP0 samples to WAV
 - Generates byte-perfect SMPINFO0.SP0 metadata
 
@@ -109,7 +109,7 @@ Recent pattern work:
 - Unresolved hardware tuple families are preserved and inspectable instead of being flattened into generic filler
 - Restore to Card now removes stale sample SP0 files while preserving destination pattern files unless the selected virtual card explicitly includes them
 
-RDAC audio decoding is experimental — samples are recognisable but noisy. Structural accuracy (pattern selection, bit extraction, hierarchical interpolation) is confirmed with 0.93 spectral correlation to hardware output.
+RDAC audio decoding uses the solved codec from the Roland SP RDAC Toolkit. All three sample modes decode at their native rates — STANDARD (44.1 kHz), LONG (22.05 kHz), and LO-FI (11.025 kHz) — with the mode detected per pad from the SMPINFO rate field. The codec is validated byte-exact against hardware-written reference cards.
 
 Please report issues at [github.com/OneCoinOnePlay/dr-sidekick/issues](https://github.com/OneCoinOnePlay/dr-sidekick/issues).
 
@@ -122,7 +122,7 @@ Dr. Sidekick reads and writes the SP-303's native SmartMedia card format:
 | `PTNDATA0.SP0` | Pattern event data (16 slots × 1024 bytes) |
 | `PTNINFO0.SP0` | Pattern metadata and slot mapping (64 bytes) |
 | `SMPINFO0.SP0` | Sample slot assignments (65 536 bytes) |
-| `SMPxxxxL/R.SP0` | Sample audio data (RDAC MT1 compressed) |
+| `SMPxxxxL/R.SP0` | Sample audio data (RDAC compressed; 12-byte blocks in 512-byte pages for STANDARD/LONG, raw 8-byte blocks for LO-FI) |
 
 ## SmartMedia Library
 

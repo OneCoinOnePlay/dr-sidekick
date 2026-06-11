@@ -21,13 +21,13 @@ from dr_sidekick.engine import (
     SLOT_COUNT,
     SMPINFO,
     SP303CardPrep,
+    SlotRecord,
     SourceType,
     VirtualCard,
     find_wav_files,
     parse_mpc1000_pgm,
     quick_import,
-    SP303_SAMPLE_RATE,
-    sp303_decode_sp0,
+    sp303_codec,
     sp303_write_wav,
 )
 from dr_sidekick.ui.branding import create_brand_header
@@ -381,6 +381,7 @@ def open_sample_manager(host: SampleManagerHost, smpinfo_path: Optional[Path] = 
     rearrange_target_iid: Optional[str] = None
     rearrange_source_iid: Optional[str] = None
     slot_metadata: Dict[int, Dict[str, str]] = {}
+    slot_records: Dict[int, SlotRecord] = {}
     level_state: Dict[int, int] = {}
     baseline_level_state: Dict[int, int] = {}
     gate_state: Dict[int, bool] = {}
@@ -578,6 +579,7 @@ def open_sample_manager(host: SampleManagerHost, smpinfo_path: Optional[Path] = 
             for slot in range(SLOT_COUNT):
                 session.clear_slot(slot)
             slot_metadata.clear()
+            slot_records.clear()
             level_state.clear()
             gate_state.clear()
             loop_state.clear()
@@ -589,14 +591,22 @@ def open_sample_manager(host: SampleManagerHost, smpinfo_path: Optional[Path] = 
                 if slot_record.is_empty:
                     continue
 
-                seconds = slot_record.sample_length_bytes / 33075.0
+                # LO-FI streams are raw 8-byte blocks; STANDARD/LONG are 12-byte blocks.
+                block_bytes = (
+                    sp303_codec.LOFI_BLOCK_BYTES
+                    if slot_record.sample_rate == sp303_codec.LOFI_SAMPLE_RATE
+                    else sp303_codec.BLOCK_BYTES
+                )
+                frames = slot_record.sample_length_bytes // block_bytes * sp303_codec.SAMPLES_PER_BLOCK
+                seconds = frames / slot_record.sample_rate
                 duration_text = f"{seconds:.2f}s" if seconds >= 1.0 else f"{seconds * 1000.0:.1f}ms"
                 level_state[slot] = slot_record.level
                 gate_state[slot] = slot_record.is_gate
                 loop_state[slot] = slot_record.is_loop
                 reverse_state[slot] = slot_record.is_reverse
+                slot_records[slot] = slot_record
                 slot_metadata[slot] = {
-                    "long_lofi": "-",
+                    "long_lofi": "-" if slot_record.mode == "STANDARD" else slot_record.mode,
                     "stereo": "Stereo" if slot_record.is_stereo else "Mono",
                     "length": f"{slot_record.sample_length_bytes:,} B",
                     "duration": duration_text,
@@ -898,18 +908,36 @@ def open_sample_manager(host: SampleManagerHost, smpinfo_path: Optional[Path] = 
 
         threading.Thread(target=cleanup, args=(proc, tmp_path), daemon=True).start()
 
-    def decode_sp0_to_pcm(left_path: Path, is_stereo: bool):
-        samples_l = sp303_decode_sp0(str(left_path))
+    def decode_sp0_channel(path: Path, record: Optional[SlotRecord]) -> tuple[List[int], int]:
+        """Decode one SP0 audio file, returning (samples, sample_rate)."""
+        if record is not None:
+            lo_fi = record.sample_rate == sp303_codec.LOFI_SAMPLE_RATE
+            samples = sp303_codec.decode_sp0_file(
+                path, encoded_length=record.sample_length_bytes, lo_fi=lo_fi
+            )
+            return samples, record.sample_rate
+        # No SMPINFO record (arbitrary file): STANDARD/LONG streams are
+        # page-framed; LO-FI streams are raw blocks. LONG is byte-identical to
+        # STANDARD, so without metadata we default to 44.1 kHz.
+        raw = path.read_bytes()
+        if sp303_codec.looks_page_framed(raw):
+            samples = sp303_codec.decode_standard_stream(sp303_codec.strip_page_trailers(raw))
+            return samples, sp303_codec.STANDARD_SAMPLE_RATE
+        return sp303_codec.decode_lofi_stream(raw), sp303_codec.LOFI_SAMPLE_RATE
+
+    def decode_sp0_to_pcm(left_path: Path, is_stereo: bool, slot: Optional[int] = None):
+        record = slot_records.get(slot) if slot is not None else None
+        samples_l, sample_rate = decode_sp0_channel(left_path, record)
         if is_stereo:
             right_path = left_path.with_name(left_path.name[:-5] + "R.SP0")
             if right_path.exists():
-                samples_r = sp303_decode_sp0(str(right_path))
+                samples_r, _ = decode_sp0_channel(right_path, record)
                 count = max(len(samples_l), len(samples_r))
                 samples_l += [0] * (count - len(samples_l))
                 samples_r += [0] * (count - len(samples_r))
                 pcm = [value for pair in zip(samples_l, samples_r) for value in pair]
-                return pcm, count, 2
-        return samples_l, len(samples_l), 1
+                return pcm, count, 2, sample_rate
+        return samples_l, len(samples_l), 1, sample_rate
 
     def preview_pad() -> None:
         slot = selected_slot()
@@ -928,10 +956,12 @@ def open_sample_manager(host: SampleManagerHost, smpinfo_path: Optional[Path] = 
             return
         stop_playback()
         try:
-            pcm, n_samples, channels = decode_sp0_to_pcm(source.source_path, source.is_stereo)
+            pcm, n_samples, channels, sample_rate = decode_sp0_to_pcm(
+                source.source_path, source.is_stereo, slot
+            )
             fd, tmp_path = tempfile.mkstemp(suffix=".wav")
             with os.fdopen(fd, "wb") as wav_file:
-                sp303_write_wav(wav_file, n_samples, SP303_SAMPLE_RATE, channels)
+                sp303_write_wav(wav_file, n_samples, sample_rate, channels)
                 wav_file.write(struct.pack(f"<{len(pcm)}h", *pcm))
             launch_playback(tmp_path, tmp_path)
         except Exception as exc:
@@ -940,12 +970,14 @@ def open_sample_manager(host: SampleManagerHost, smpinfo_path: Optional[Path] = 
     def convert_sp0_to_wav() -> None:
         left_path: Optional[Path] = None
         is_stereo = False
+        slot: Optional[int] = None
         selection = tree.selection()
         if selection:
             source = session.prep.sources[int(selection[0])]
             if source.source_type == SourceType.ARCHIVED_SP0 and source.source_path is not None:
                 left_path = source.source_path
                 is_stereo = source.is_stereo
+                slot = int(selection[0])
         if left_path is None:
             sp0_file = filedialog.askopenfilename(
                 parent=dialog,
@@ -958,11 +990,21 @@ def open_sample_manager(host: SampleManagerHost, smpinfo_path: Optional[Path] = 
             if left_path.name.upper().endswith("L.SP0"):
                 right_path = left_path.with_name(left_path.name[:-5] + "R.SP0")
                 is_stereo = right_path.exists()
-        # SP-303 naming: SMP0000L.SP0 → SMPL0001.WAV (index + 1)
+        # SP-303 naming: SMP0000L.SP0 → SMPL0001.WAV (hex index + 1)
         raw_stem = left_path.stem[:-1] if left_path.stem.upper().endswith("L") else left_path.stem
         upper_stem = raw_stem.upper()
-        if upper_stem.startswith("SMP") and upper_stem[3:].isdigit():
-            wav_stem = f"SMPL{int(upper_stem[3:]) + 1:04d}"
+        slot_digits = upper_stem[3:]
+        if upper_stem.startswith("SMP") and slot_digits and all(c in "0123456789ABCDEF" for c in slot_digits):
+            file_slot = int(slot_digits, 16)
+            wav_stem = f"SMPL{file_slot + 1:04d}"
+            # An arbitrary file from the loaded card still has SMPINFO metadata.
+            if (
+                slot is None
+                and loaded_smpinfo_path is not None
+                and left_path.parent == loaded_smpinfo_path.parent
+                and file_slot in slot_records
+            ):
+                slot = file_slot
         else:
             wav_stem = raw_stem
         out_file = filedialog.asksaveasfilename(
@@ -975,14 +1017,15 @@ def open_sample_manager(host: SampleManagerHost, smpinfo_path: Optional[Path] = 
         if not out_file:
             return
         try:
-            pcm, n_samples, channels = decode_sp0_to_pcm(left_path, is_stereo)
+            pcm, n_samples, channels, sample_rate = decode_sp0_to_pcm(left_path, is_stereo, slot)
             with open(out_file, "wb") as wav_file:
-                sp303_write_wav(wav_file, n_samples, SP303_SAMPLE_RATE, channels)
+                sp303_write_wav(wav_file, n_samples, sample_rate, channels)
                 wav_file.write(struct.pack(f"<{len(pcm)}h", *pcm))
-            duration = n_samples / SP303_SAMPLE_RATE
+            duration = n_samples / sample_rate
             messagebox.showinfo(
                 "Convert SP0 to WAV",
-                f"Saved: {out_file}\n{n_samples:,} samples  {duration:.2f}s  {'Stereo' if channels == 2 else 'Mono'}  31.25 kHz",
+                f"Saved: {out_file}\n{n_samples:,} samples  {duration:.2f}s  "
+                f"{'Stereo' if channels == 2 else 'Mono'}  {sample_rate / 1000:g} kHz",
                 parent=dialog,
             )
             log.info(

@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from copy import deepcopy
 from datetime import datetime
 from enum import Enum
@@ -27,6 +27,8 @@ import traceback
 import urllib.error
 import urllib.request
 import wave
+
+from .sp303_codec import MODE_BY_RATE, sample_rate_from_field
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 log = logging.getLogger("dr_sidekick")
@@ -116,39 +118,6 @@ class GrooveTiming:
             offset = timings[0]
             timings = [t - offset for t in timings]
         return cls(name=midi_path.stem, timings=timings)
-
-
-@dataclass(frozen=True)
-class SP303SelectorDispatch:
-    """Firmware jump-table metadata for one 3-bit selector value."""
-    selector: int
-    routine_addr: Optional[int]
-    param: Optional[int]
-    label: str
-    verified: bool = True
-
-
-@dataclass
-class SP303BlockTrace:
-    """Inspection view of one 16-byte MT1 block.
-
-    This is intentionally metadata-heavy and conservative: it exposes only the
-    decode state that is currently grounded well enough to inspect safely.
-    """
-    block_index: int
-    offset: int
-    dispatch_index: int
-    fmt_id: int
-    sub_op: int
-    anchor_flag: int
-    selectors: List[int] = field(default_factory=list)
-    selector_dispatch: List[Dict[str, Optional[int]]] = field(default_factory=list)
-    use_standard_anchor: bool = False
-    shift: int = 0
-    predictor_in: int = 0
-    predictor_out: int = 0
-    notes: List[str] = field(default_factory=list)
-    samples: List[int] = field(default_factory=list)
 
 
 @dataclass
@@ -1114,17 +1083,15 @@ DSP_COMMANDS_START = 0x0380
 DSP_COMMANDS_SIZE = 128
 SAMPLE_FILE_SIZE = 16384  # 16KB per sample file
 
-# SP-303 hardware constants (from firmware analysis)
-SP303_CLOCK_HZ = 37_500_000       # Hardware clock frequency
-SP303_FLAGS_K  = 312_500           # = SP303_CLOCK_HZ / 120 (BPM reference divisor)
-SP303_DEFAULT_PARAMS = 0x04B0      # Default clock divider → 31,250 Hz
+# SP-303 hardware constants
+SP303_FLAGS_K  = 312_500           # Flags divisor (= 37.5 MHz hardware clock / 120)
+SP303_DEFAULT_PARAMS = 0x04B0      # params word the hardware writes for every slot
 SP303_FLAGS_EMPTY    = 0x0000_0100 # flags value for empty slots
 SP303_FLAGS_OCCUPIED_MIN = 0x0040  # smallest valid flags for a populated slot
 
-# Template bytes (from firmware analysis)
+# Template bytes (observed on hardware-written cards)
 TEMPLATE_BYTES_24_27_EMPTY = bytes.fromhex("00000100")
 TEMPLATE_BYTES_28_31_EMPTY = bytes.fromhex("04b004b0")
-TEMPLATE_BYTES_32_35 = bytes.fromhex("113a067f")
 TEMPLATE_BYTES_40_43 = bytes.fromhex("00004000")
 TEMPLATE_BYTES_44_47 = bytes.fromhex("03000000")
 
@@ -1151,6 +1118,7 @@ PAD_MAPPING_OPCODE = bytes.fromhex("b00402")
 PAD_MAPPING_OPCODES_ACCEPTED = {
     PAD_MAPPING_OPCODE,
     bytes.fromhex("04b002"),
+    bytes.fromhex("04b004"),
     bytes.fromhex("04b008"),
 }
 
@@ -1172,8 +1140,12 @@ class SlotRecord:
     0x10-0x13 (4 bytes):  loop_start  — loop point in bytes (big-endian)
     0x14-0x17 (4 bytes):  sample_end  — = sample_len (repeated, big-endian)
     0x18-0x1B (4 bytes):  flags       — power-of-2 duration category (computed)
-    0x1C-0x1F (4 bytes):  params      — two copies of 16-bit clock divider
-    0x20-0x23 (4 bytes):  dsp_const   — always 0x113A06xx (xx = 0x7F default)
+    0x1C-0x1F (4 bytes):  params      — two copies of 16-bit params word (always 0x04B0)
+    0x20-0x21 (2 bytes):  rate_field  — playback rate in tens of Hz, big-endian:
+                                        0x113A = 4410 → 44.1 kHz (STANDARD),
+                                        2205 → 22.05 kHz (LONG), 1102 → 11.025 kHz (LO-FI)
+    0x22      (1 byte):   (const)     — always 0x06
+    0x23      (1 byte):   level       — sample level, 0x00-0x7F
     0x24      (1 byte):   stereo      — 0x00 = mono, 0x01 = stereo
     0x25      (1 byte):   gate        — 0x00 = normal, 0x01 = gate on
     0x26      (1 byte):   loop        — 0x00 = no loop, 0x01 = loop on
@@ -1185,8 +1157,8 @@ class SlotRecord:
     sample_length_bytes: int  # Actual audio data length
     loop_point_bytes: int  # Loop point or = length for no loop
     is_stereo: bool
-    params_word: int = SP303_DEFAULT_PARAMS  # 16-bit clock divider; sample_rate = 37,500_000 / params_word
-    sample_rate: int = 31250            # Derived hardware rate
+    params_word: int = SP303_DEFAULT_PARAMS  # 16-bit params word at 0x1C, preserved for round-trip
+    sample_rate: int = 44100           # Playback rate from the 0x20 rate field (44100/22050/11025)
     is_gate: bool = False              # Gate playback mode (byte 0x25)
     is_loop: bool = False              # Loop playback mode (byte 0x26)
     is_reverse: bool = False           # Reverse playback mode (byte 0x27)
@@ -1207,7 +1179,12 @@ class SlotRecord:
     def is_empty(self) -> bool:
         """Check if slot is empty"""
         return self.sample_length_bytes == 0
-    
+
+    @property
+    def mode(self) -> str:
+        """Sample mode (STANDARD/LONG/LO-FI) derived from the playback rate."""
+        return MODE_BY_RATE.get(self.sample_rate, f"{self.sample_rate} Hz")
+
     @property
     def sample_filename_base(self) -> str:
         """Get sample filename without extension: SMP000X"""
@@ -1248,8 +1225,11 @@ class SlotRecord:
             divider = self.params_word & 0xFFFF
             record[28:32] = struct.pack('>HH', divider, divider)
         
-        # Bytes 32-35: DSP constant (0x113A06xx where xx = level)
-        record[32:36] = bytes([0x11, 0x3A, 0x06, self.level & 0x7F])
+        # Bytes 32-33: rate field (tens of Hz); byte 34: const 0x06; byte 35: level
+        rate_field = 1102 if self.sample_rate == 11025 else self.sample_rate // 10
+        record[32:34] = struct.pack('>H', rate_field)
+        record[34] = 0x06
+        record[35] = self.level & 0x7F
         
         # Byte 36: Stereo flag
         record[36] = 0x01 if self.is_stereo else 0x00
@@ -1281,9 +1261,11 @@ class SlotRecord:
         reserved_0_11 = data[0:12]
         sample_length = struct.unpack('>I', data[12:16])[0]
         loop_point = struct.unpack('>I', data[16:20])[0]
-        # Preserve params_word (bytes 28-29 = first 16-bit clock divider) for round-trip fidelity
+        # Preserve params_word (bytes 28-29 = first copy) for round-trip fidelity
         params_word = struct.unpack('>H', data[28:30])[0] or SP303_DEFAULT_PARAMS
-        sample_rate = int(SP303_CLOCK_HZ / params_word)
+        # Bytes 32-33: playback rate in tens of Hz (1102 means the hardware's 1102.5)
+        rate_field = struct.unpack('>H', data[32:34])[0]
+        sample_rate = sample_rate_from_field(rate_field) if rate_field else 44100
             
         is_stereo = data[36] == 0x01
         is_gate = data[37] == 0x01
@@ -1342,702 +1324,6 @@ class PadMapping:
         
         pad_number = data[3]
         return cls(pad_index=pad_number - 1)
-
-
-# ── SP-303 RDAC MT1/MT2 decoder ───────────────────────────────────────────────
-# Derived from SP-303 firmware disassembly (SH-DSP, 2026).
-# Dispatch table parsed from firmware 0xE000 (256 × 20-byte records).
-# Shift LUT at firmware 0xB4C0 (64 entries).
-# Microkernel jump table at 0xBCD0 (8 entries, selectors 0-7).
-
-# Firmware dispatch table: 256 entries indexed by (block[0] & 0xF0) | (block[2] >> 4)
-# Each entry: (fmt_id, sub_op, anchor_flag)
-#   fmt_id:      format identifier (0x06-0x23) → controls interp function
-#   sub_op:      sub-operation; = shift amount for fmt 0x0A+; format-specific for 0x08/0x09
-#   anchor_flag: 0x00 = no explicit anchor; 0x40 = standard 16-bit anchor at s15;
-#                0x14/0x0A/0x7F/0xFF = non-standard anchor modes (unresolved)
-# Parsed directly from sp303.prg firmware binary at 0xE000.
-_SP303_FW_DISPATCH = [
-    # 0x00-0x07
-    (0x06,  32, 0x00),    (0x07,   0, 0xFF),    (0x07,   1, 0xFF),    (0x08,   0, 0x00),
-    (0x08,   1, 0x00),    (0x08,   2, 0x00),    (0x08,   3, 0x00),    (0x08,   4, 0x00),
-    # 0x08-0x0F
-    (0x08,   5, 0x00),    (0x08,   6, 0x00),    (0x08,   7, 0x00),    (0x08,   8, 0x00),
-    (0x08,  10, 0x00),    (0x08,  12, 0x00),    (0x08,  14, 0x00),    (0x08,  16, 0x00),
-    # 0x10-0x17
-    (0x08,  20, 0x00),    (0x08,  24, 0x00),    (0x08,  28, 0x00),    (0x09,   0, 0x00),
-    (0x09,   1, 0x00),    (0x09,   2, 0x00),    (0x09,   3, 0x00),    (0x09,   4, 0x00),
-    # 0x18-0x1F
-    (0x09,   5, 0x00),    (0x09,   6, 0x00),    (0x09,   7, 0x00),    (0x09,   8, 0x00),
-    (0x09,   9, 0x00),    (0x09,  10, 0x00),    (0x09,  11, 0x00),    (0x09,  12, 0x00),
-    # 0x20-0x27
-    (0x09,  13, 0x00),    (0x09,  14, 0x00),    (0x09,  15, 0x00),    (0x09,  16, 0x00),
-    (0x09,  17, 0x00),    (0x09,  18, 0x00),    (0x09,  19, 0x00),    (0x09,  20, 0x00),
-    # 0x28-0x2F
-    (0x09,  21, 0x00),    (0x09,  22, 0x00),    (0x09,  23, 0x00),    (0x09,  24, 0x00),
-    (0x09,  25, 0x00),    (0x09,  26, 0x00),    (0x09,  27, 0x00),    (0x09,  28, 0x00),
-    # 0x30-0x37
-    (0x09,  29, 0x00),    (0x09,  30, 0x00),    (0x09,  31, 0x00),    (0x09,  32, 0x00),
-    (0x0A,   0, 0x00),    (0x0A,   1, 0x00),    (0x0A,   2, 0x00),    (0x0A,   3, 0x00),
-    # 0x38-0x3F
-    (0x0A,   4, 0x00),    (0x0A,   5, 0x00),    (0x0A,   6, 0x00),    (0x0A,   7, 0x00),
-    (0x0B,   0, 0x7F),    (0x0B,   1, 0x00),    (0x0B,   2, 0x00),    (0x0B,   3, 0x00),
-    # 0x40-0x47
-    (0x0B,   4, 0x00),    (0x0B,   5, 0x00),    (0x0B,   6, 0x00),    (0x0B,   7, 0x00),
-    (0x0C,   0, 0x40),    (0x0C,   1, 0x00),    (0x0C,   2, 0x40),    (0x0C,   3, 0x00),
-    # 0x48-0x4F
-    (0x0C,   4, 0x00),    (0x0C,   5, 0x00),    (0x0C,   6, 0x00),    (0x0C,   7, 0x00),
-    (0x0D,   0, 0x40),    (0x0D,   1, 0x40),    (0x0D,   2, 0x40),    (0x0D,   3, 0x00),
-    # 0x50-0x57
-    (0x0D,   4, 0x00),    (0x0D,   5, 0x00),    (0x0D,   6, 0x00),    (0x0D,   7, 0x00),
-    (0x0E,   0, 0x40),    (0x0E,   1, 0x00),    (0x0E,   2, 0x40),    (0x0E,   3, 0x00),
-    # 0x58-0x5F
-    (0x0E,   4, 0x00),    (0x0E,   5, 0x00),    (0x0E,   6, 0x00),    (0x0E,   7, 0x00),
-    (0x0F,   0, 0x40),    (0x0F,   1, 0x40),    (0x0F,   2, 0x40),    (0x0F,   3, 0x00),
-    # 0x60-0x67
-    (0x0F,   4, 0x00),    (0x0F,   5, 0x00),    (0x0F,   6, 0x00),    (0x0F,   7, 0x00),
-    (0x10,   0, 0x40),    (0x10,   1, 0x40),    (0x10,   2, 0x40),    (0x10,   3, 0x00),
-    # 0x68-0x6F
-    (0x10,   4, 0x00),    (0x10,   5, 0x00),    (0x10,   6, 0x00),    (0x10,   7, 0x00),
-    (0x11,   0, 0x14),    (0x11,   1, 0x40),    (0x11,   2, 0x40),    (0x11,   3, 0x00),
-    # 0x70-0x77
-    (0x11,   4, 0x00),    (0x11,   5, 0x00),    (0x11,   6, 0x00),    (0x11,   7, 0x00),
-    (0x12,   0, 0x40),    (0x12,   1, 0x40),    (0x12,   2, 0x40),    (0x12,   3, 0x00),
-    # 0x78-0x7F
-    (0x12,   4, 0x00),    (0x12,   5, 0x00),    (0x12,   6, 0x00),    (0x12,   7, 0x00),
-    (0x13,   0, 0x40),    (0x13,   1, 0x40),    (0x13,   2, 0x40),    (0x13,   3, 0x00),
-    # 0x80-0x87
-    (0x13,   4, 0x00),    (0x13,   5, 0x00),    (0x13,   6, 0x00),    (0x13,   7, 0x00),
-    (0x14,   0, 0x00),    (0x14,   1, 0x40),    (0x14,   2, 0x00),    (0x14,   3, 0x00),
-    # 0x88-0x8F
-    (0x14,   4, 0x00),    (0x14,   5, 0x00),    (0x14,   6, 0x00),    (0x14,   7, 0x00),
-    (0x15,   0, 0x40),    (0x15,   1, 0x40),    (0x15,   2, 0x40),    (0x15,   3, 0x00),
-    # 0x90-0x97
-    (0x15,   4, 0x00),    (0x15,   5, 0x00),    (0x15,   6, 0x00),    (0x15,   7, 0x00),
-    (0x16,   0, 0x40),    (0x16,   1, 0x40),    (0x16,   2, 0x40),    (0x16,   3, 0x00),
-    # 0x98-0x9F
-    (0x16,   4, 0x00),    (0x16,   5, 0x00),    (0x16,   6, 0x00),    (0x16,   7, 0x00),
-    (0x17,   0, 0x40),    (0x17,   1, 0x40),    (0x17,   2, 0x40),    (0x17,   3, 0x00),
-    # 0xA0-0xA7
-    (0x17,   4, 0x00),    (0x17,   5, 0x00),    (0x17,   6, 0x00),    (0x17,   7, 0x00),
-    (0x18,   0, 0x14),    (0x18,   1, 0x0A),    (0x18,   2, 0x40),    (0x18,   3, 0x00),
-    # 0xA8-0xAF
-    (0x18,   4, 0x00),    (0x18,   5, 0x00),    (0x18,   6, 0x00),    (0x18,   7, 0x00),
-    (0x19,   0, 0x40),    (0x19,   1, 0x00),    (0x19,   2, 0x40),    (0x19,   3, 0x00),
-    # 0xB0-0xB7
-    (0x19,   4, 0x00),    (0x19,   5, 0x00),    (0x19,   6, 0x00),    (0x19,   7, 0x00),
-    (0x1A,   0, 0x40),    (0x1A,   1, 0x40),    (0x1A,   2, 0x40),    (0x1A,   3, 0x00),
-    # 0xB8-0xBF
-    (0x1A,   4, 0x00),    (0x1A,   5, 0x00),    (0x1A,   6, 0x00),    (0x1A,   7, 0x00),
-    (0x1B,   0, 0x40),    (0x1B,   1, 0x40),    (0x1B,   2, 0x40),    (0x1B,   3, 0x00),
-    # 0xC0-0xC7
-    (0x1B,   4, 0x00),    (0x1B,   5, 0x00),    (0x1B,   6, 0x00),    (0x1B,   7, 0x00),
-    (0x1C,   0, 0x40),    (0x1C,   1, 0x40),    (0x1C,   2, 0x40),    (0x1C,   3, 0x00),
-    # 0xC8-0xCF
-    (0x1C,   4, 0x00),    (0x1C,   5, 0x00),    (0x1C,   6, 0x00),    (0x1C,   7, 0x00),
-    (0x1D,   0, 0x40),    (0x1D,   1, 0x40),    (0x1D,   2, 0x40),    (0x1D,   3, 0x00),
-    # 0xD0-0xD7
-    (0x1D,   4, 0x00),    (0x1D,   5, 0x00),    (0x1D,   6, 0x00),    (0x1D,   7, 0x00),
-    (0x1E,   0, 0x40),    (0x1E,   1, 0x40),    (0x1E,   2, 0x40),    (0x1E,   3, 0x00),
-    # 0xD8-0xDF
-    (0x1E,   4, 0x00),    (0x1E,   5, 0x00),    (0x1E,   6, 0x00),    (0x1E,   7, 0x00),
-    (0x1F,   0, 0x00),    (0x1F,   1, 0x00),    (0x1F,   2, 0x40),    (0x1F,   3, 0x00),
-    # 0xE0-0xE7
-    (0x1F,   4, 0x00),    (0x1F,   5, 0x00),    (0x1F,   6, 0x00),    (0x1F,   7, 0x00),
-    (0x20,   0, 0x40),    (0x20,   1, 0x40),    (0x20,   2, 0x40),    (0x20,   3, 0x00),
-    # 0xE8-0xEF
-    (0x20,   4, 0x00),    (0x20,   5, 0x00),    (0x20,   6, 0x00),    (0x20,   7, 0x00),
-    (0x21,   0, 0x00),    (0x21,   1, 0x40),    (0x21,   2, 0x00),    (0x21,   3, 0x00),
-    # 0xF0-0xF7
-    (0x21,   4, 0x00),    (0x21,   5, 0x00),    (0x21,   6, 0x00),    (0x21,   7, 0x00),
-    (0x22,   0, 0x40),    (0x22,   1, 0x40),    (0x22,   2, 0x40),    (0x22,   3, 0x00),
-    # 0xF8-0xFF
-    (0x22,   4, 0x00),    (0x22,   5, 0x00),    (0x22,   6, 0x00),    (0x22,   7, 0x00),
-    (0x23,   0, 0x40),    (0x23,   1, 0x7F),    (0x23,   2, 0x00),    (0x23,   3, 0x00),
-]
-
-# Lattice reorder: firmware unpacks residuals into this sample order
-_SP303_LATTICE = [14, 6, 2, 10, 0, 4, 8, 12, 1, 3, 5, 7, 9, 11, 13, 15]
-
-# Residual bit width: 6-bit confirmed by pshl #1,0x6 trace in hotspot
-# kernels (0x69xx, 0x6Cxx).  Bit budget: 8 hdr + 16 anchor + 15 sel + 90 res = 129
-# (1 bit absorbed by interleave alignment).
-_SP303_RESIDUAL_WIDTH = 6
-
-# Firmware jump table at 0xBCD0. CPU-side selector-to-routine mapping is now
-# stable enough to expose as metadata, but DSP-side selector effects are still
-# too incomplete to drive playback behavior.
-_SP303_SELECTOR_DISPATCH = {
-    0: SP303SelectorDispatch(0, 0x6D00, 2, "kernel_a_variant_2"),
-    1: SP303SelectorDispatch(1, 0x6100, 0, "kernel_b_variant_0"),
-    2: SP303SelectorDispatch(2, 0x1900, 0, "kernel_c"),
-    3: SP303SelectorDispatch(3, 0x6D00, 10, "kernel_a_variant_10"),
-    4: SP303SelectorDispatch(4, 0x6100, 8, "kernel_b_variant_8"),
-    5: SP303SelectorDispatch(5, 0x2900, 8, "kernel_d"),
-    6: SP303SelectorDispatch(6, None, None, "null_jump_entry"),
-    7: SP303SelectorDispatch(7, 0x3808, 6, "kernel_e"),
-}
-
-
-# Firmware shift LUT at 0xB4C0 — 64 entries indexed by block[0] >> 2.
-# Used ONLY for formats 0x08 and 0x09.  Formats 0x0A+ use sub_op as shift.
-_SP303_FW_SHIFT_LUT64 = [
-    19, 19, 19, 18, 18, 18, 17, 17, 16, 16, 16, 15, 15, 15, 14, 14,
-    13, 13, 13, 12, 12, 12, 11, 11, 10, 10, 10,  9,  9,  9,  8,  8,
-     7,  7,  7,  6,  6,  5,  5,  5,  4,  4,  4,  3,  3,  2,  2,  2,
-     1,  1,  1,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
-]
-
-
-_SP303_RDAC_PATTERNS = [
-    0, 0, 0, 0,  1, 1, 1, 1,  2, 2, 2, 2,  3, 3, 3, 3,
-    0, 0, 0, 0,  1, 1, 1, 1,  2, 2, 2, 2,  3, 3, 3, 3,
-    0, 0, 0, 0,  1, 1, 1, 1,  2, 2, 2, 2,  3, 3, 3, 3,
-    0, 0, 0, 0,  1, 1, 1, 1,  2, 2, 2, 2,  3, 3, 3, 3,
-    4, 4, 4, 4,  5, 5, 5, 5,  6, 6, 6, 6,  7, 7, 7, 7,
-    4, 4, 4, 4,  5, 5, 5, 5,  6, 6, 6, 6,  7, 7, 7, 7,
-    4, 4, 4, 4,  5, 5, 5, 5,  6, 6, 6, 6,  7, 7, 7, 7,
-    4, 4, 4, 4,  5, 5, 5, 5,  6, 6, 6, 6,  7, 7, 7, 7,
-    8, 8, 8, 8,  9, 9, 9, 9,  10, 10, 10, 10, 11, 11, 11, 11,
-    8, 8, 8, 8,  9, 9, 9, 9,  10, 10, 10, 10, 11, 11, 11, 11,
-    8, 8, 8, 8,  9, 9, 9, 9,  10, 10, 10, 10, 11, 11, 11, 11,
-    8, 8, 8, 8,  9, 9, 9, 9,  10, 10, 10, 10, 11, 11, 11, 11,
-    12, 12, 13, 13, 14, 14, 15, 15, 16, 16, 17, 17, 18, 18, 19, 19,
-    12, 12, 13, 13, 14, 14, 15, 15, 16, 16, 17, 17, 18, 18, 19, 19,
-    20, 20, 21, 21, 22, 22, 23, 23, 24, 24, 25, 26, 27, 28, 29, 30,
-    20, 20, 21, 21, 22, 22, 23, 23, 24, 24, 31, 32, 33, 34, 35, 36,
-]
-
-
-def _sp303_p(s):
-    return s.replace(" ", "")
-
-
-_SP303_PAT_A = _sp303_p(
-    "ppp88888 88888888 pppggggg gggggggg 87777776 66666655 gffffffe eeeeeedd"
-    " 55554444 44444333 ddddcccc cccccbbb 33322222 22111111 bbbaaaaa aa999999"
-)
-_SP303_PAT_B = _sp303_p(
-    "pp888888 88888887 ppgggggg gggggggf 77777666 66666555 fffffeee eeeeeddd"
-    " 55544444 44443333 dddccccc ccccbbbb 33222222 22111111 bbaaaaaa aa999999"
-)
-_SP303_PAT_B3 = _sp303_p(
-    "ppp88888 88888887 pppggggg gggggggf 77777666 66666555 fffffeee eeeeeddd"
-    " 55544444 44443333 dddccccc ccccbbbb 33222222 22111111 bbaaaaaa aa999999"
-)
-_SP303_PAT_C = _sp303_p(
-    "ppp88888 88888877 pppggggg ggggggff 77776666 66665555 ffffeeee eeeedddd"
-    " 55444444 44443333 ddcccccc ccccbbbb 33222222 22111111 bbaaaaaa aa999999"
-)
-_SP303_PAT_D = _sp303_p(
-    "pp888888 88877777 ppgggggg gggfffff 77666666 66555555 ffeeeeee eedddddd"
-    " 54444444 44333333 dccccccc ccbbbbbb 32222222 21111111 baaaaaaa a9999999"
-)
-_SP303_PAT_E = _sp303_p(
-    "pppp8888 88888877 ppppgggg ggggggff 77776666 66665555 ffffeeee eeeedddd"
-    " 55444444 44443333 ddcccccc ccccbbbb 33222222 22111111 bbaaaaaa aa999999"
-)
-_SP303_PAT_F = _sp303_p(
-    "pppp8888 88887777 ppppgggg ggggffff 77766666 66655555 fffeeeee eeeddddd"
-    " 55444444 44333333 ddcccccc ccbbbbbb 32222222 21111111 baaaaaaa a9999999"
-)
-_SP303_PAT_B4 = _sp303_p(
-    "pppp8888 88888887 ppppgggg gggggggf 77777666 66665555 ffffffee eeeeeddd"
-    " 55554444 44433333 ddddcccc cccbbbbb 33222222 21111111 bbaaaaaa a9999999"
-)
-
-_SP303_SYM = {c: i for i, c in enumerate("123456789abcdefg")}
-_SP303_SYM["p"] = -1
-
-
-def _sp303_shift_round(out, pos):
-    if pos == 0:
-        return
-    if pos > 0:
-        half = 1 << (pos - 1)
-        for i in range(16):
-            out[i] = (out[i] << pos) | half
-    else:
-        rsh = -pos
-        for i in range(16):
-            out[i] >>= rsh
-
-
-def _sp303_sign_extend(value: int, bits: int) -> int:
-    mask = (1 << bits) - 1
-    value &= mask
-    sign = 1 << (bits - 1)
-    return (value ^ sign) - sign
-
-
-def _sp303_mask_l(byte_val: int, mask: int, lsh: int) -> int:
-    return (byte_val & mask) << lsh
-
-
-def _sp303_mask_r(byte_val: int, mask: int, rsh: int) -> int:
-    return (byte_val & mask) >> rsh
-
-
-def _sp303_shift_round_value(value: int, pos: int) -> int:
-    if pos <= 0:
-        return value >> (-pos) if pos < 0 else value
-    return (value << pos) | (1 << (pos - 1))
-
-
-def _sp303_apply_pattern(block, pattern):
-    out, out_pos = [0] * 16, [0] * 16
-    for in_pos in range(15, -1, -1):
-        byte_pat = pattern[in_pos * 8: in_pos * 8 + 8]
-        byte_val = block[in_pos]
-        for bit_pos in range(8):
-            out_idx = _SP303_SYM[byte_pat[7 - bit_pos]]
-            if out_idx == -1:
-                continue
-            if (byte_val >> bit_pos) & 1:
-                out[out_idx] |= 1 << out_pos[out_idx]
-            out_pos[out_idx] += 1
-    max_depth = max(out_pos) if any(out_pos) else 1
-    for i in range(16):
-        if out_pos[i] > 0:
-            mask = 1 << (out_pos[i] - 1)
-            out[i] = -(out[i] & mask) | out[i]
-    return out, max_depth
-
-
-def _sp303_apply_pattern_b_explicit(block: bytes, shift: int) -> List[int]:
-    b = block
-    raw = [
-        (_sp303_mask_l(b[13], 0x3F, 0), 6),
-        (_sp303_mask_l(b[12], 0x3F, 2) | _sp303_mask_r(b[13], 0xC0, 6), 8),
-        (_sp303_mask_l(b[9], 0x0F, 2) | _sp303_mask_r(b[12], 0xC0, 6), 6),
-        (_sp303_mask_l(b[8], 0x1F, 4) | _sp303_mask_r(b[9], 0xF0, 4), 9),
-        (_sp303_mask_l(b[5], 0x07, 3) | _sp303_mask_r(b[8], 0xE0, 5), 6),
-        (_sp303_mask_l(b[4], 0x07, 5) | _sp303_mask_r(b[5], 0xF8, 3), 8),
-        (_sp303_mask_l(b[1], 0x01, 5) | _sp303_mask_r(b[4], 0xF8, 3), 6),
-        (_sp303_mask_l(b[0], 0x3F, 7) | _sp303_mask_r(b[1], 0xFE, 1), 13),
-        (_sp303_mask_l(b[15], 0x3F, 0), 6),
-        (_sp303_mask_l(b[14], 0x3F, 2) | _sp303_mask_r(b[15], 0xC0, 6), 8),
-        (_sp303_mask_l(b[11], 0x0F, 2) | _sp303_mask_r(b[14], 0xC0, 6), 6),
-        (_sp303_mask_l(b[10], 0x1F, 4) | _sp303_mask_r(b[11], 0xF0, 4), 9),
-        (_sp303_mask_l(b[7], 0x07, 3) | _sp303_mask_r(b[10], 0xE0, 5), 6),
-        (_sp303_mask_l(b[6], 0x07, 5) | _sp303_mask_r(b[7], 0xF8, 3), 8),
-        (_sp303_mask_l(b[3], 0x01, 5) | _sp303_mask_r(b[6], 0xF8, 3), 6),
-        (_sp303_mask_l(b[2], 0x3F, 7) | _sp303_mask_r(b[3], 0xFE, 1), 13),
-    ]
-    return [_sp303_shift_round_value(_sp303_sign_extend(val, bits), shift) for val, bits in raw]
-
-
-def _sp303_apply_pattern_d_explicit(block: bytes, shift: int) -> List[int]:
-    b = block
-    raw = [
-        (_sp303_mask_l(b[9], 0x0F, 0), 4),
-        (_sp303_mask_l(b[8], 0x03, 4) | _sp303_mask_r(b[9], 0xF0, 4), 6),
-        (_sp303_mask_r(b[8], 0x3C, 2), 4),
-        (_sp303_mask_l(b[5], 0x3F, 2) | _sp303_mask_r(b[8], 0xC0, 6), 8),
-        (_sp303_mask_l(b[4], 0x03, 2) | _sp303_mask_r(b[5], 0xC0, 6), 4),
-        (_sp303_mask_r(b[4], 0xFC, 2), 6),
-        (_sp303_mask_r(b[1], 0x0F, 0), 4),
-        (_sp303_mask_l(b[0], 0x0F, 4) | _sp303_mask_r(b[1], 0xF0, 4), 8),
-        (_sp303_mask_l(b[11], 0x0F, 0), 4),
-        (_sp303_mask_l(b[10], 0x03, 4) | _sp303_mask_r(b[11], 0xF0, 4), 6),
-        (_sp303_mask_r(b[10], 0x3C, 2), 4),
-        (_sp303_mask_l(b[7], 0x3F, 2) | _sp303_mask_r(b[10], 0xC0, 6), 8),
-        (_sp303_mask_l(b[6], 0x03, 2) | _sp303_mask_r(b[7], 0xC0, 6), 4),
-        (_sp303_mask_r(b[6], 0xFC, 2), 6),
-        (_sp303_mask_r(b[3], 0x0F, 0), 4),
-        (_sp303_mask_l(b[2], 0x0F, 4) | _sp303_mask_r(b[3], 0xF0, 4), 8),
-    ]
-    return [_sp303_shift_round_value(_sp303_sign_extend(val, bits), shift) for val, bits in raw]
-
-
-def _sp303_interp(a, b):
-    s = a + b
-    return -((-s + 1) // 2) if s < 0 else s // 2
-
-
-def _sp303_interp2(d0, out):
-    out[3]  += _sp303_interp(d0,      out[7]);  out[1]  += _sp303_interp(d0,      out[3])
-    out[5]  += _sp303_interp(out[3],  out[7]);  out[11] += _sp303_interp(out[7],  out[15])
-    out[9]  += _sp303_interp(out[7],  out[11]); out[13] += _sp303_interp(out[11], out[15])
-    out[0]  += _sp303_interp(d0,      out[1]);  out[2]  += _sp303_interp(out[1],  out[3])
-    out[4]  += _sp303_interp(out[3],  out[5]);  out[6]  += _sp303_interp(out[5],  out[7])
-    out[8]  += _sp303_interp(out[7],  out[9]);  out[10] += _sp303_interp(out[9],  out[11])
-    out[12] += _sp303_interp(out[11], out[13]); out[14] += _sp303_interp(out[13], out[15])
-
-
-def _sp303_interp4(d0, out):
-    out[1]  += _sp303_interp(d0,      out[3]);  out[5]  += _sp303_interp(out[3],  out[7])
-    out[9]  += _sp303_interp(out[7],  out[11]); out[13] += _sp303_interp(out[11], out[15])
-    out[0]  += _sp303_interp(d0,      out[1]);  out[2]  += _sp303_interp(out[1],  out[3])
-    out[4]  += _sp303_interp(out[3],  out[5]);  out[6]  += _sp303_interp(out[5],  out[7])
-    out[8]  += _sp303_interp(out[7],  out[9]);  out[10] += _sp303_interp(out[9],  out[11])
-    out[12] += _sp303_interp(out[11], out[13]); out[14] += _sp303_interp(out[13], out[15])
-
-
-def _sp303_interp8(d0, out):
-    out[0]  += _sp303_interp(d0,      out[1]);  out[2]  += _sp303_interp(out[1],  out[3])
-    out[4]  += _sp303_interp(out[3],  out[5]);  out[6]  += _sp303_interp(out[5],  out[7])
-    out[8]  += _sp303_interp(out[7],  out[9]);  out[10] += _sp303_interp(out[9],  out[11])
-    out[12] += _sp303_interp(out[11], out[13]); out[14] += _sp303_interp(out[13], out[15])
-
-
-# Format ID → interpolation function (from microkernel disassembly)
-# Handover line 384-400: Format ID → extraction mapping table
-_SP303_FMT_INTERP = {
-    # 0x06: init/special — silenced
-    # 0x07: special (anchor=0xFF) — silenced
-    0x08: _sp303_interp4,   # interp4, 4 anchors (s3,s7,s11,s15)
-    0x09: _sp303_interp4,   # interp4, standard SP-303 mode
-    0x0A: _sp303_interp4,   # interp4, high-precision variant
-    0x0B: _sp303_interp4,   # interp4, high-precision variant
-    0x0C: _sp303_interp2,   # interp2, 2 anchors (s7,s15)
-    0x0D: _sp303_interp2,   # interp2
-    0x0E: _sp303_interp2,   # interp2
-    0x0F: _sp303_interp2,   # interp2
-    0x10: _sp303_interp2,   # interp2
-    0x11: _sp303_interp2,   # interp2, high-fidelity variant
-    0x12: _sp303_interp2,   # interp2
-    0x13: _sp303_interp2,   # interp2
-    0x14: _sp303_interp2,   # interp2
-    0x15: _sp303_interp2,   # interp2
-    0x16: _sp303_interp2,   # interp2
-    0x17: _sp303_interp2,   # interp2
-    0x18: _sp303_interp2,   # interp2
-    0x19: _sp303_interp2,   # interp2
-    0x1A: _sp303_interp2,   # interp2
-    0x1B: _sp303_interp2,   # interp2
-    0x1C: _sp303_interp2,   # interp2
-    0x1D: _sp303_interp8,   # interp8, 8 anchors — piano/complex transients
-    0x1E: _sp303_interp8,   # interp8
-    0x1F: _sp303_interp2,   # interp2+, specialized 7-bit variant
-    0x20: _sp303_interp2,   # interp2+
-    0x21: _sp303_interp2,   # interp2+
-    0x22: _sp303_interp2,   # interp2+
-    0x23: _sp303_interp2,   # interp2+
-}
-
-
-def _sp303_extract_standard_anchor(block):
-    """Extract the standard 0x40 anchor using the verified interleaved bit path."""
-    bankX = int.from_bytes(block[0:8], 'big')
-    bankY = int.from_bytes(block[8:16], 'big')
-    anchor = 0
-    for i in range(8):
-        anchor = (anchor << 1) | ((bankX >> (63 - (8 + i))) & 1)
-        anchor = (anchor << 1) | ((bankY >> (63 - i)) & 1)
-    if anchor >= 0x8000:
-        anchor -= 0x10000
-    return anchor
-
-
-def _sp303_interleaved_metadata_bits(block):
-    """Return the first 32 interleaved metadata bits from the firmware path."""
-    bankX = int.from_bytes(block[0:8], 'big')
-    bankY = int.from_bytes(block[8:16], 'big')
-    bits = []
-    for i in range(16):
-        bits.append(str((bankX >> (63 - (8 + i))) & 1))
-        bits.append(str((bankY >> (63 - i)) & 1))
-    return "".join(bits)
-
-
-def _sp303_decode_selector_bits(selector_bits):
-    """Decode a 15-bit selector string into five 3-bit selector values."""
-    selectors = []
-    for offset in range(0, min(len(selector_bits), 15), 3):
-        chunk = selector_bits[offset:offset + 3]
-        if len(chunk) < 3:
-            break
-        selectors.append(int(chunk, 2))
-    return selectors
-
-
-def _sp303_extract_selectors(block):
-    """Extract the verified 5×3-bit selector field from the interleaved metadata path.
-
-    The selector field and CPU-side jump-table mapping are firmware-verified.
-    The software decoder still does not apply selector-driven DSP behavior,
-    because the kernel-side write counts and bit consumption are not fully
-    grounded yet.
-    """
-    bits = _sp303_interleaved_metadata_bits(block)
-    return _sp303_decode_selector_bits(bits[16:31])
-def _sp303_selector_dispatch_trace(selectors):
-    """Map raw selectors to the verified CPU-side jump-table metadata only."""
-    trace = []
-    for selector in selectors:
-        entry = _SP303_SELECTOR_DISPATCH.get(
-            selector,
-            SP303SelectorDispatch(selector, None, None, f"unknown_selector_{selector}", verified=False),
-        )
-        trace.append(
-            {
-                "selector": entry.selector,
-                "routine_addr": entry.routine_addr,
-                "param": entry.param,
-                "label": entry.label,
-                "verified": entry.verified,
-            }
-        )
-    return trace
-def _sp303_extract_firmware(block, use_standard_anchor):
-    """Extract 16 values from a 16-byte block using the verified decoder scaffold.
-
-    This extraction layout is the current production scaffold, not a fully
-    executed SH-DSP proof. It matches the grounded CPU-side metadata path while
-    leaving unresolved DSP-side behavior out of playback decisions.
-
-    Dual-bank block layout used here:
-      Bank X = bytes 0-7  (64 bits)
-      Bank Y = bytes 8-15 (64 bits)
-
-    Bit budget (128 bits total, anchored):
-      Header:    8 bits  (X[0:7] — dispatch index)
-      Anchor:   16 bits  (standard mode only: interleaved X8,Y0,X9,Y1,...X15,Y7)
-      Selectors: 15 bits (5×3-bit, from same interleaved stream)
-      Residuals: 90 bits (15 × 6-bit residual values in the current scaffold)
-
-    This only applies the standard 0x40 anchor mode. Non-standard anchor modes
-    remain unresolved in firmware analysis, so the decoder leaves them on the
-    anchorless path instead of forcing them through the standard extractor.
-
-    Selector extraction and CPU-side jump-table mapping are firmware-verified
-    and exposed separately, but DSP-side selector behavior and the real load
-    path are still unresolved and are not applied here.
-    """
-    W = _SP303_RESIDUAL_WIDTH  # 6
-    bankX = int.from_bytes(block[0:8], 'big')
-    bankY = int.from_bytes(block[8:16], 'big')
-    out = [0] * 16
-
-    # X residuals always start at bit 16 (after 8 header + 8 metadata/skip)
-    xp = 16
-    if use_standard_anchor:
-        out[15] = _sp303_extract_standard_anchor(block)
-
-        # Y residuals start after 8 anchor bits + 14 selector bits = bit 22
-        yp = 22
-    else:
-        # No anchor: Y residuals start at bit 16 (skip region)
-        yp = 16
-
-    half = 1 << (W - 1)   # 32
-    full = 1 << W          # 64
-
-    # Extract residuals in lattice order: pairs (X, Y)
-    # Lattice: [14, 6, 2, 10, 0, 4, 8, 12, 1, 3, 5, 7, 9, 11, 13, 15]
-    for i in range(0, 16, 2):
-        sx = _SP303_LATTICE[i]
-        sy = _SP303_LATTICE[i + 1]
-
-        # X residual
-        val = 0
-        for _ in range(W):
-            val = (val << 1) | ((bankX >> (63 - xp)) & 1)
-            xp += 1
-        if val >= half:
-            val -= full
-        out[sx] = val
-
-        # Y residual (skip if this is the explicit standard anchor position)
-        if sy == 15 and use_standard_anchor:
-            pass  # anchor already set above
-        else:
-            val = 0
-            for _ in range(W):
-                val = (val << 1) | ((bankY >> (63 - yp)) & 1)
-                yp += 1
-            if val >= half:
-                val -= full
-            out[sy] = val
-
-    return out
-def _sp303_prepare_mt1(d0: int, block: bytes):
-    """Prepare the firmware-grounded decoder state for one MT1 block.
-
-    This exposes verified CPU-side dispatch metadata and extracted selector bits
-    without treating unresolved DSP-side selector behavior as decoder truth.
-    """
-    idx = (block[0] & 0xF0) | ((block[2] & 0xF0) >> 4)
-    fmt_id, sub_op, anchor_flag = _SP303_FW_DISPATCH[idx]
-    selectors = _sp303_extract_selectors(block)
-    selector_dispatch = _sp303_selector_dispatch_trace(selectors)
-    use_standard_anchor = anchor_flag == 0x40
-    interp_func = _SP303_FMT_INTERP.get(fmt_id)
-    notes = []
-    if anchor_flag not in (0x00, 0x40):
-        notes.append(
-            f"non-standard anchor flag 0x{anchor_flag:02X} is not implemented as an explicit anchor path"
-        )
-    if any(item["selector"] == 6 for item in selector_dispatch):
-        notes.append("selector 6 maps to the verified null jump-table entry bytes at 0xBCE8")
-    if any(not item["verified"] for item in selector_dispatch):
-        notes.append("one or more selectors still map to unresolved jump-table behavior")
-
-    if fmt_id <= 0x07:
-        out = [0] * 16
-        shift = 0
-        notes.append("special/init format routed to silence")
-    else:
-        out = _sp303_extract_firmware(block, use_standard_anchor)
-        if fmt_id <= 0x09:
-            shift = _SP303_FW_SHIFT_LUT64[block[0] >> 2]
-        else:
-            shift = sub_op
-        _sp303_shift_round(out, shift)
-        if interp_func:
-            interp_func(d0, out)
-        for i in range(16):
-            if out[i] < -32768:
-                out[i] = -32768
-            elif out[i] > 32767:
-                out[i] = 32767
-
-    trace = SP303BlockTrace(
-        block_index=-1,
-        offset=-1,
-        dispatch_index=idx,
-        fmt_id=fmt_id,
-        sub_op=sub_op,
-        anchor_flag=anchor_flag,
-        selectors=selectors,
-        selector_dispatch=selector_dispatch,
-        use_standard_anchor=use_standard_anchor,
-        shift=shift,
-        predictor_in=d0,
-        predictor_out=out[15] if out else d0,
-        notes=notes,
-        samples=out,
-    )
-    return trace
-
-
-def _sp303_decode_mt1(d0: int, block: bytes) -> List[int]:
-    """Decode one 16-byte MT1 block to 16 signed 16-bit samples.
-
-    Firmware-aligned pipeline (handover "Complete decode pipeline"):
-      1. Dispatch:  index = (block[0] & 0xF0) | (block[2] >> 4)
-                    → _SP303_FW_DISPATCH[index] → (fmt_id, sub_op, anchor_flag)
-      2. Split:     Bank X = block[0:8], Bank Y = block[8:16]
-      3. Metadata:  standard 0x40 anchor uses interleaved X8,Y0,X9,Y1,...
-                    selectors are extracted from the same interleaved path
-      4. Residuals: Pop 15×6-bit (standard-anchored) or 16×6-bit (otherwise)
-      5. Shift:     fmt 0x08/0x09: _SP303_FW_SHIFT_LUT64[block[0] >> 2]
-                    fmt 0x0A+: sub_op directly
-      6. Interp:    Apply interp2/interp4/interp8
-      7. Clamp:     Saturate to [-32768, 32767]
-    """
-    return _sp303_prepare_mt1(d0, block).samples
-
-
-def _sp303_decode_mt1_playback(d0: int, block: bytes) -> List[int]:
-    """Decode one MT1 block using the known-good audible PAT/depth path.
-
-    This remains the active playback decoder because it materially outperforms
-    the newer firmware-grounded scaffold by ear. The firmware scaffold is kept
-    separately for inspection and ongoing reverse engineering.
-    """
-    p = _SP303_RDAC_PATTERNS[(block[0] & 0xF0) | ((block[2] & 0xF0) >> 4)]
-    lut_val = _SP303_FW_SHIFT_LUT64[block[0] >> 2]
-
-    pat_map = {
-        0: (_SP303_PAT_B, _sp303_interp2), 1: (_SP303_PAT_B, _sp303_interp2),
-        2: (_SP303_PAT_B, _sp303_interp2), 3: (_SP303_PAT_B, _sp303_interp2),
-        4: (_SP303_PAT_B, _sp303_interp2), 5: (_SP303_PAT_B, _sp303_interp2),
-        6: (_SP303_PAT_D, _sp303_interp4), 7: (_SP303_PAT_D, _sp303_interp4),
-        8: (_SP303_PAT_D, _sp303_interp4), 9: (_SP303_PAT_D, _sp303_interp4),
-        10: (_SP303_PAT_D, _sp303_interp4), 11: (_SP303_PAT_D, _sp303_interp4),
-        12: (_SP303_PAT_A, _sp303_interp2), 13: (_SP303_PAT_A, _sp303_interp2),
-        14: (_SP303_PAT_A, _sp303_interp2), 15: (_SP303_PAT_A, _sp303_interp2),
-        16: (_SP303_PAT_A, _sp303_interp2), 17: (_SP303_PAT_A, _sp303_interp2),
-        18: (_SP303_PAT_B3, _sp303_interp2),
-        19: (_SP303_PAT_C, _sp303_interp2), 20: (_SP303_PAT_C, _sp303_interp2),
-        21: (_SP303_PAT_C, _sp303_interp2), 22: (_SP303_PAT_C, _sp303_interp2),
-        23: (_SP303_PAT_C, _sp303_interp2), 24: (_SP303_PAT_C, _sp303_interp2),
-        25: (_SP303_PAT_F, _sp303_interp8), 26: (_SP303_PAT_F, _sp303_interp8),
-        27: (_SP303_PAT_F, _sp303_interp8), 28: (_SP303_PAT_F, _sp303_interp8),
-        29: (_SP303_PAT_F, _sp303_interp8),
-        30: (_SP303_PAT_F, None),
-        31: (_SP303_PAT_E, _sp303_interp4),
-        32: (_SP303_PAT_B4, _sp303_interp2), 33: (_SP303_PAT_B4, _sp303_interp2),
-        34: (_SP303_PAT_B4, _sp303_interp2), 35: (_SP303_PAT_B4, _sp303_interp2),
-        36: (_SP303_PAT_B4, _sp303_interp2),
-    }
-
-    if p not in pat_map:
-        return [0] * 16
-
-    pat_str, interp_func = pat_map[p]
-    explicit_pat = os.getenv("DR_SIDEKICK_RDAC_EXPLICIT_PAT") == "1"
-    if explicit_pat and pat_str == _SP303_PAT_B:
-        # decode.c PATTERN B uses explicit sign widths and fixed shift steps 6..11.
-        shift = 6 + p
-        out = _sp303_apply_pattern_b_explicit(block, shift)
-    elif explicit_pat and pat_str == _SP303_PAT_D:
-        # decode.c exposes one explicit PATTERN D layout with SHIFT_ROUND_8.
-        shift = 8
-        out = _sp303_apply_pattern_d_explicit(block, shift)
-    else:
-        out, max_depth = _sp303_apply_pattern(block, pat_str)
-        shift = (23 - max(1, max_depth)) - lut_val
-        _sp303_shift_round(out, shift)
-    if interp_func:
-        interp_func(d0, out)
-    elif p == 30:
-        for i in range(0, 16, 2):
-            out[i] <<= 1
-    return out
-
-
-def sp303_inspect_mt1_block(d0: int, block: bytes) -> dict:
-    """Return firmware-grounded metadata for one MT1 block.
-
-    This is intended for ongoing reverse engineering and test correlation from
-    Python tooling without turning unresolved selector behavior into decoder
-    logic.
-    """
-    return asdict(_sp303_prepare_mt1(d0, block))
-
-
-def sp303_inspect_sp0(path: str, max_blocks: Optional[int] = None) -> List[dict]:
-    """Inspect an SP0 file block-by-block using the current firmware-grounded scaffold."""
-    file_size = os.path.getsize(path)
-    traces: List[dict] = []
-    d0 = 0
-    with open(path, 'rb') as f:
-        block_index = 0
-        while block_index < file_size // 16:
-            if max_blocks is not None and block_index >= max_blocks:
-                break
-            block = f.read(16)
-            if len(block) < 16:
-                break
-            trace = _sp303_prepare_mt1(d0, block)
-            trace.block_index = block_index
-            trace.offset = block_index * 16
-            traces.append(asdict(trace))
-            d0 = trace.predictor_out
-            block_index += 1
-    return traces
-
-
-SP303_SAMPLE_RATE = 31250  # 20 MHz master clock / 640 divider
-
-
-def sp303_decode_sp0(path: str) -> List[int]:
-    """Decode an SP0 file to a flat list of 16-bit PCM samples (31250 Hz native)."""
-    file_size = os.path.getsize(path)
-    samples: List[int] = []
-    d0 = 0
-    with open(path, 'rb') as f:
-        for _ in range(file_size // 16):
-            block = f.read(16)
-            if len(block) < 16:
-                break
-            chunk = _sp303_decode_mt1_playback(d0, block)
-            samples.extend(max(-32768, min(32767, sample >> 8)) for sample in chunk)
-            d0 = chunk[15]
-    return samples
 
 
 def sp303_write_wav(f, num_samples: int, sample_rate: int, num_channels: int = 1) -> None:

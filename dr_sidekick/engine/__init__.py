@@ -1,5 +1,6 @@
 """Engine compatibility exports for the Dr. Sidekick package."""
 
+from . import rdac, sp303_codec  # noqa: F401
 from .core import *  # noqa: F401,F403
 from .core import GrooveLibrary, GrooveTemplate  # noqa: F401
 from .packs import Pack, discover_packs, promote_card_to_pack  # noqa: F401
