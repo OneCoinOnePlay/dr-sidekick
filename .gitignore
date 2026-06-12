@@ -10,10 +10,11 @@ __pycache__/
 # Private / internal notes (not for public repo)
 AGENTS.md
 CLAUDE.md
-PTNDATA_CANONICAL.md
 FIRMWARE_SINGLE_SOURCE.md
-Foundational_Mandates.md
-OVERDUB_HANDOVER.md
+
+# App runtime state (machine-specific, app-written)
+dr_sidekick_config.json
+Dr_Sidekick.log
 
 # Test binary artifacts
 test_*.bin
