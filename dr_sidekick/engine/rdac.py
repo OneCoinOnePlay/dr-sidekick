@@ -1,10 +1,15 @@
-#!/usr/bin/env python3
-"""RDAC codec support for SP-555 STANDARD and observed lo-fi sample data."""
+"""RDAC decode support for SP-555 STANDARD and observed lo-fi sample data.
+
+Decode-side port from the Roland SP RDAC Toolkit. The toolkit's encoder
+chain and stream scanners were removed here as dead code — they live in the
+upstream toolkit. The live entry points are `parse_control`,
+`decode_rdac_block`, and `RdacControl`, plus the shared truth tables at the
+bottom of the module that `sp303_codec` builds on.
+"""
 
 from __future__ import annotations
 
 import dataclasses
-import collections
 
 
 @dataclasses.dataclass(frozen=True)
@@ -13,19 +18,6 @@ class RdacControl:
     exponent: int
     control_byte: int
     unit_bytes: int
-
-
-@dataclasses.dataclass(frozen=True)
-class Sp5EncoderSelection:
-    family: str
-    exponent: int
-    candidate: int
-    candidates: tuple[tuple[str, int], ...]
-    metrics: tuple[tuple[str, int], ...]
-
-
-def _u16(value: int) -> int:
-    return value & 0xFFFF
 
 
 def _s16(value: int) -> int:
@@ -753,17 +745,22 @@ def decode_rdac_block(
     block: bytes,
     previous: int,
     unit_bytes: int = 8,
+    control: RdacControl | None = None,
 ) -> tuple[list[int], int, RdacControl]:
     """Decode one RDAC block into 16 PCM samples.
 
     `fcn.004685e0` copies `unit_bytes * 2` bytes to a local buffer, then calls
     the family helper twice: first with the staged buffer base, then with the
-    same buffer plus two bytes. This function models that call structure for
-    ported family helpers.
+    same buffer plus two bytes. Only unit sizes 4 and 8 stage enough bytes for
+    both family windows, so other unit sizes are rejected up front. A caller
+    that already parsed the control byte can pass it to skip the re-parse.
     """
 
+    if unit_bytes not in (4, 8):
+        raise ValueError("decode_rdac_block supports unit_bytes=4 or 8 only")
     staged = bytes(_prepare_control_bytes(block, unit_bytes))
-    control = parse_control(block, unit_bytes)
+    if control is None:
+        control = parse_control(block, unit_bytes)
 
     first, first_previous = decode_family_window(
         control.family,
@@ -780,17 +777,6 @@ def decode_rdac_block(
         unit_bytes=unit_bytes,
     )
     return first + second, second_previous, control
-
-
-def decode_family_b_block(
-    block: bytes,
-    previous: int,
-    unit_bytes: int = 8,
-) -> tuple[list[int], int, RdacControl]:
-    decoded, next_previous, control = decode_rdac_block(block, previous, unit_bytes)
-    if control.family != "B":
-        raise ValueError(f"family-B block required, got {control.family}")
-    return decoded, next_previous, control
 
 
 def _prepare_control_bytes(block: bytes, unit_bytes: int) -> bytearray:
@@ -829,10 +815,7 @@ def parse_control(block: bytes, unit_bytes: int = 4) -> RdacControl:
     dl = control & 0xCC
 
     if dl < 0x48:
-        if dl < 0x48:
-            exponent = ((((control >> 2) & 0x30) | (control & 0x0C)) >> 2) + 2
-        else:
-            exponent = 8
+        exponent = ((((control >> 2) & 0x30) | (control & 0x0C)) >> 2) + 2
         return RdacControl("E", exponent, control, unit_bytes)
 
     cl = control & 0xEE
@@ -893,432 +876,31 @@ def _parse_family_d_control(control: int, cl: int, unit_bytes: int) -> RdacContr
     return RdacControl("D", exponent, control, unit_bytes)
 
 
-def scan_controls(data: bytes, unit_bytes: int = 8) -> collections.Counter[tuple[str, int]]:
-    """Classify a stream as fixed-size RDAC blocks."""
+# ---------------------------------------------------------------------------
+# Shared RDAC truth tables and reconstruction rules
+#
+# The decode cascades above inline their own shift arithmetic; this section is
+# the single home for the per-family code bit-widths and predictive
+# reconstruction rules that `sp303_codec` builds on. Unit-4 widths derive from
+# the unit-8 base table as `width - 4`; the SP-303 unit-6 codec derives its
+# table as `width - 2`. The SP5 encoder these were extracted from lives in the
+# upstream Roland SP RDAC Toolkit and was removed here as dead code.
 
-    step = unit_bytes * 2
-    counts: collections.Counter[tuple[str, int]] = collections.Counter()
-    for offset in range(0, len(data) - step + 1, step):
-        control = parse_control(data[offset : offset + step], unit_bytes)
-        counts[(control.family, control.exponent)] += 1
-    return counts
-
-
-def _clip_i16(value: int) -> int:
-    return max(-32768, min(32767, value))
-
-
-def decode_ported_stream(data: bytes, unit_bytes: int = 8) -> tuple[list[int], collections.Counter[str]]:
-    step = unit_bytes * 2
-    previous = 0
-    decoded: list[int] = []
-    families: collections.Counter[str] = collections.Counter()
-    for offset in range(0, len(data) - step + 1, step):
-        block = data[offset : offset + step]
-        control = parse_control(block, unit_bytes)
-        families[control.family] += 1
-        if control.family not in ("A", "B", "C", "D", "E", "F", "G"):
-            break
-        samples, previous, _ = decode_rdac_block(block, previous, unit_bytes)
-        decoded.extend(samples)
-    return decoded, families
-
-
-def _sp5_encoder_magnitude(value: int) -> int:
-    return value if value >= 0 else ~value
-
-
-def _sp5_collect_encoder_metrics(
-    window: list[int],
-    previous: int,
-    metrics: dict[str, int],
-) -> int:
-    """Port of encoder metric collector `0x00466c20`.
-
-    The helper scans one 8-sample half-block and ORs one's-complement
-    magnitudes into the same metric slots that the selector later reduces.
-    """
-
-    if len(window) != 8:
-        raise ValueError("SP5 encoder metric collection requires exactly 8 samples")
-
-    previous = _clip_i16(previous)
-    sample = [_clip_i16(value) for value in window]
-    s0, s1, s2, s3, s4, s5, s6, s7 = sample
-
-    metrics["0c"] |= _sp5_encoder_magnitude(s7)
-    metrics["10"] |= _sp5_encoder_magnitude(s3)
-    metrics["20"] |= _sp5_encoder_magnitude(s3 - ((s7 + previous) >> 1))
-
-    metrics["14"] |= _sp5_encoder_magnitude(s1)
-    metrics["24"] |= _sp5_encoder_magnitude(s1 - ((previous + s3) >> 1))
-
-    metrics["14"] |= _sp5_encoder_magnitude(s5)
-    metrics["24"] |= _sp5_encoder_magnitude(s5 - ((s3 + s7) >> 1))
-
-    metrics["28"] |= _sp5_encoder_magnitude(s0 - ((s1 + previous) >> 1))
-    metrics["28"] |= _sp5_encoder_magnitude(s2 - ((s1 + s3) >> 1))
-    metrics["28"] |= _sp5_encoder_magnitude(s4 - ((s3 + s5) >> 1))
-    metrics["28"] |= _sp5_encoder_magnitude(s6 - ((s5 + s7) >> 1))
-    return s7
-
-
-def _sp5_candidate_is_better(candidate: int, current: int) -> bool:
-    """Mirror the selector's bit-mask comparison from `0x00466e42`.
-
-    The binary chooses the candidate with the lower highest-set bit. Equal
-    exponent ties keep the earlier family in B, C, D, E, F order.
-    """
-
-    current_only_bits = (candidate | current) ^ candidate
-    return _s32(candidate) < _s32(current_only_bits)
-
-
-def _sp5_exponent_for_candidate(candidate: int) -> int:
-    exponent = 13
-    if candidate >= 0x4000:
-        return exponent
-
-    value = candidate
-    while value < 0x4000:
-        value += value
-        exponent -= 1
-    return exponent
-
-
-def _sp5_select_family(
-    samples: list[int],
-    previous: int,
-    unit_bytes: int = 8,
-) -> Sp5EncoderSelection:
-    """Port of the SP5.exe encoder family/exponent selector at `0x00466d10`."""
-
-    if len(samples) != 16:
-        raise ValueError("SP5 encoder selection requires exactly 16 samples")
-    if unit_bytes < 4:
-        raise ValueError("SP5 encoder selection requires unit_bytes >= 4")
-
-    metrics = {
-        "0c": 0,
-        "10": 0,
-        "14": 0,
-        "20": 0,
-        "24": 0,
-        "28": 0,
-    }
-
-    half_previous = _sp5_collect_encoder_metrics(samples[:8], previous, metrics)
-    _sp5_collect_encoder_metrics(samples[8:], half_previous, metrics)
-
-    metric_0c = metrics["0c"]
-    metric_10 = metrics["10"]
-    metric_14 = metrics["14"]
-    metric_20 = metrics["20"]
-    metric_24 = metrics["24"]
-    metric_28 = metrics["28"]
-    unit_floor = 3 << (unit_bytes - 4)
-    metric_28_double = metric_28 + metric_28
-
-    family_b = (metric_0c | metric_10 | metric_14 | 0x7FE) >> 1
-    family_b |= metric_28
-    family_b |= unit_floor
-
-    family_c = (metric_0c | metric_10 | 0x3FC) >> 1
-    family_c |= metric_24
-    family_c >>= 1
-    family_c |= metric_28
-    family_c |= unit_floor
-
-    family_d = (metric_0c | 0x3F0) >> 1
-    family_d |= metric_20
-    family_d >>= 2
-    family_d |= metric_24
-    family_d >>= 1
-    family_d |= metric_28_double
-    family_d |= unit_floor
-
-    family_e = (metric_0c | 0x3C0) >> 4
-    family_e |= metric_20
-    family_e >>= 1
-    family_e |= metric_24
-    family_e >>= 1
-    family_e |= metric_28_double
-    family_e |= unit_floor
-
-    family_f = (metric_0c | 0x180) >> 5
-    family_f |= metric_20
-    family_f >>= 2
-    family_f |= metric_28_double
-    family_f |= metric_24
-    family_f |= unit_floor
-
-    if unit_bytes == 4:
-        family_b |= 0x3FFF
-    else:
-        family_f |= 7
-
-    if family_d > 0x7FF:
-        family_d = (metric_24 | 0x1FFE) >> 1
-        family_d |= metric_28_double
-
-    candidates = (
-        ("B", family_b),
-        ("C", family_c),
-        ("D", family_d),
-        ("E", family_e),
-        ("F", family_f),
-    )
-    selected_family, selected_candidate = candidates[0]
-    for candidate_family, candidate in candidates[1:]:
-        if _sp5_candidate_is_better(candidate, selected_candidate):
-            selected_family = candidate_family
-            selected_candidate = candidate
-
-    exponent = _sp5_exponent_for_candidate(selected_candidate)
-    if exponent == 13:
-        selected_family = "A"
-
-    return Sp5EncoderSelection(
-        selected_family,
-        exponent,
-        selected_candidate,
-        candidates,
-        tuple(sorted(metrics.items())),
-    )
-
-
-def encode_family_a_window(samples: list[int]) -> bytes:
-    """Encode eight PCM samples as one unit-8 family-A RDAC window."""
-
-    if len(samples) != 8:
-        raise ValueError("family-A encoding requires exactly 8 samples")
-
-    packed_byte_positions = (13, 12, 9, 8, 5, 4, 1, 0)
-    packed = 0
-    bit_cursor = 0
-    for index, sample in enumerate(samples):
-        code, _decoded = _family_a_code_and_decoded(sample, index)
-        bits = 8 if index & 1 else 7
-        packed |= code << bit_cursor
-        bit_cursor += bits
-
-    window = bytearray(14)
-    for byte_index, byte_position in enumerate(packed_byte_positions):
-        window[byte_position] = (packed >> (byte_index * 8)) & 0xFF
-    return bytes(window)
-
-
-def encode_family_a_block(samples: list[int]) -> bytes:
-    """Encode sixteen PCM samples as one unit-8 family-A RDAC block."""
-
-    if len(samples) != 16:
-        raise ValueError("family-A block encoding requires exactly 16 samples")
-
-    block, _, _ = _encode_family_a_block_scored(samples)
-    return block
-
-
-def _score_block(decoded: list[int], target: list[int]) -> int:
-    return sum((got - want) * (got - want) for got, want in zip(decoded, target, strict=True))
-
-
-_FAMILY_A_CODE_SHIFTS = (0, 7, 15, 22, 30, 37, 45, 52)
-_FAMILY_A_TABLES: tuple[list[int], list[int], list[int], list[int]] | None = None
-_PREDICTIVE_WIDTHS = {
+PREDICTIVE_WIDTHS = {
     "B": (7, 8, 7, 8, 7, 8, 7, 8),
     "C": (7, 8, 7, 9, 7, 8, 7, 7),
     "D": (6, 8, 6, 10, 6, 8, 6, 10),
     "E": (6, 8, 6, 9, 6, 8, 6, 11),
     "F": (6, 7, 6, 9, 6, 7, 6, 13),
 }
-_PREDICTIVE_WIDTHS_UNIT4 = {
+PREDICTIVE_WIDTHS_UNIT4 = {
     family: tuple(width - 4 for width in widths)
-    for family, widths in _PREDICTIVE_WIDTHS.items()
-}
-_SP5_Q6_WIDTH_PARAMETER = {
-    "D": 6,
-    "E": 5,
-    "F": 5,
-}
-_SP5_MID_WIDTH_PARAMETER = {
-    "C": 4,
-    "D": 4,
-    "E": 4,
-    "F": 3,
-}
-_SP5_EVEN_WIDTH_PARAMETER = {
-    "B": 3,
-    "C": 3,
-    "D": 2,
-    "E": 2,
-    "F": 2,
+    for family, widths in PREDICTIVE_WIDTHS.items()
 }
 
 
-def _family_a_code_and_decoded(sample: int, index: int) -> tuple[int, int]:
-    mask, bias = rdac_mask_bias(13, 8)
-    if index & 1:
-        half_mask = _sar32(mask, 1)
-        half_bias = _sar32(bias, 1)
-        decoded = _s16((_clip_i16(sample) & half_mask) | half_bias)
-        code = ((decoded & half_mask) >> 8) & 0xFF
-    else:
-        decoded = _s16((_clip_i16(sample) & mask) | bias)
-        code = ((decoded & mask) >> 9) & 0x7F
-    return code, decoded
-
-
-def _family_a_tables() -> tuple[list[int], list[int], list[int], list[int]]:
-    global _FAMILY_A_TABLES
-    if _FAMILY_A_TABLES is not None:
-        return _FAMILY_A_TABLES
-
-    even_codes: list[int] = []
-    even_decoded: list[int] = []
-    odd_codes: list[int] = []
-    odd_decoded: list[int] = []
-    for raw in range(0x10000):
-        sample = _s16(raw)
-        even_code, even_sample = _family_a_code_and_decoded(sample, 0)
-        odd_code, odd_sample = _family_a_code_and_decoded(sample, 1)
-        even_codes.append(even_code)
-        even_decoded.append(even_sample)
-        odd_codes.append(odd_code)
-        odd_decoded.append(odd_sample)
-
-    _FAMILY_A_TABLES = even_codes, even_decoded, odd_codes, odd_decoded
-    return _FAMILY_A_TABLES
-
-
-def _encode_family_a_block_scored(samples: list[int]) -> tuple[bytes, int, int]:
-    """Return encoded family-A bytes, squared error, and decoded final sample."""
-
-    if len(samples) != 16:
-        raise ValueError("family-A block scoring requires exactly 16 samples")
-
-    even_codes, even_decoded, odd_codes, odd_decoded = _family_a_tables()
-    packed_first = 0
-    packed_second = 0
-    score = 0
-    final_decoded = 0
-
-    for index in range(8):
-        sample = _clip_i16(samples[index])
-        raw = sample & 0xFFFF
-        if index & 1:
-            code = odd_codes[raw]
-            decoded = odd_decoded[raw]
-        else:
-            code = even_codes[raw]
-            decoded = even_decoded[raw]
-        packed_first |= code << _FAMILY_A_CODE_SHIFTS[index]
-        delta = decoded - sample
-        score += delta * delta
-
-    for index in range(8):
-        sample = _clip_i16(samples[index + 8])
-        raw = sample & 0xFFFF
-        if index & 1:
-            code = odd_codes[raw]
-            decoded = odd_decoded[raw]
-        else:
-            code = even_codes[raw]
-            decoded = even_decoded[raw]
-        packed_second |= code << _FAMILY_A_CODE_SHIFTS[index]
-        delta = decoded - sample
-        score += delta * delta
-        final_decoded = decoded
-
-    block = bytearray(16)
-    block[13] = packed_first & 0xFF
-    block[12] = (packed_first >> 8) & 0xFF
-    block[9] = (packed_first >> 16) & 0xFF
-    block[8] = (packed_first >> 24) & 0xFF
-    block[5] = (packed_first >> 32) & 0xFF
-    block[4] = (packed_first >> 40) & 0xFF
-    block[1] = (packed_first >> 48) & 0xFF
-    block[0] = ((packed_first >> 56) & 0x0F) | 0xE0
-    block[15] = packed_second & 0xFF
-    block[14] = (packed_second >> 8) & 0xFF
-    block[11] = (packed_second >> 16) & 0xFF
-    block[10] = (packed_second >> 24) & 0xFF
-    block[7] = (packed_second >> 32) & 0xFF
-    block[6] = (packed_second >> 40) & 0xFF
-    block[3] = (packed_second >> 48) & 0xFF
-    block[2] = ((packed_second >> 56) & 0x0F) | 0xF0
-    return bytes(block), score, final_decoded
-
-
-def _predictive_widths_for_unit(unit_bytes: int) -> dict[str, tuple[int, ...]]:
-    return _PREDICTIVE_WIDTHS if unit_bytes == 8 else _PREDICTIVE_WIDTHS_UNIT4
-
-
-def _pack_predictive_codes(codes: list[int], widths: tuple[int, ...]) -> int:
-    packed = 0
-    bit_cursor = 0
-    for code, width in zip(codes, widths, strict=True):
-        packed |= (code & ((1 << width) - 1)) << bit_cursor
-        bit_cursor += width
-    if bit_cursor not in (60, 28):
-        raise AssertionError("predictive RDAC code widths must pack to 60 (unit-8) or 28 (unit-4) bits")
-    return packed
-
-
-def _predictive_window_from_packed(packed: int) -> bytes:
-    window = bytearray(14)
-    positions = (13, 12, 9, 8, 5, 4, 1, 0)
-    for byte_index, byte_position in enumerate(positions):
-        window[byte_position] = (packed >> (byte_index * 8)) & 0xFF
-    return bytes(window)
-
-
-def _sp5_quantize_residual(
-    target: int,
-    left: int,
-    right: int,
-    width_parameter: int,
-    exponent: int,
-    unit_bytes: int = 8,
-) -> int:
-    """Port of encoder quantizer `0x00465b60`.
-
-    The width parameter is the helper's fourth argument in SP5.exe. It is not
-    the packed field width; each family packer supplies its own constants.
-    """
-
-    mask, bias = rdac_mask_bias(exponent, unit_bytes)
-    shift = width_parameter + exponent - 1
-    average = (left + right) >> 1
-    residual = target - average
-    shifted = residual >> shift
-
-    if ((shifted >> 1) ^ shifted) != 0:
-        if residual > 0:
-            return _s32((((1 << shift) - 1) & mask) | bias)
-        return _s32(((-1 << shift) & mask) | bias)
-
-    value = _s32((residual & mask) | bias)
-    reconstructed = value + average
-    if (((reconstructed >> 1) ^ reconstructed) & 0xFFFF8000) != 0:
-        return _s32(((mask & 0xFFFF) ^ (reconstructed & 0xFFFFFFFF)) - average)
-
-    if reconstructed == -0x8000 and ((left & right) & 1):
-        value = _s32(value + bias * 2)
-    return value
-
-
-def _sp5_direct_quantized_sample(sample: int, exponent: int, unit_bytes: int = 8) -> int:
-    mask, bias = rdac_mask_bias(exponent, unit_bytes)
-    return _s32((_clip_i16(sample) & mask) | bias)
-
-
-def _sp5_predictive_average(family: str, left: int, right: int) -> int:
-    if family in ("C", "F"):
-        return _avg32(left, right)
-    return _avg16(left, right)
-
-
-def _sp5_predictive_add(family: str, base: int, average: int, index: int) -> int:
+def predictive_add(family: str, base: int, average: int, index: int) -> int:
+    """Per-family reconstruction add for the even-position predictive samples."""
     if family == "C":
         return _add_words(base, average)
     if family == "F":
@@ -1332,326 +914,16 @@ def _sp5_predictive_add(family: str, base: int, average: int, index: int) -> int
     return _s16(base + average)
 
 
-def _sp5_code_from_quantized(value: int, width: int, exponent: int, unit_bytes: int) -> int:
-    mask, _bias = rdac_mask_bias(exponent, unit_bytes)
-    shift = exponent - unit_bytes + 4
-    if shift < 0:
-        raise ValueError("SP5 predictive encoding does not support this exponent/unit size")
-    return ((value & mask) >> shift) & ((1 << width) - 1)
-
-
-def _sp5_q14_control_bits(family: str, q14: int, exponent: int, unit_bytes: int) -> int:
+def q14_extra_bit_count(family: str, exponent: int) -> int:
+    """Number of control-nibble bits that extend the q14 code for a family."""
     if family == "B":
-        bit_count = 0
-    elif family == "C":
-        bit_count = 2
-    elif family == "D":
-        bit_count = 0 if exponent == 10 else 1
-    elif family == "E":
-        bit_count = 1 if exponent == 8 else 2
-    elif family == "F":
-        bit_count = 1
-    else:
-        raise NotImplementedError(f"SP5 family-{family} q14 control bits are not ported")
-
-    if bit_count == 0:
         return 0
-
-    width = _predictive_widths_for_unit(unit_bytes)[family][7]
-    mask, _bias = rdac_mask_bias(exponent, unit_bytes)
-    shift = exponent - unit_bytes + 4
-    full_code = (q14 & mask) >> shift
-    return (full_code >> width) & ((1 << bit_count) - 1)
-
-
-def _sp5_encode_predictive_window(
-    family: str,
-    exponent: int,
-    samples: list[int],
-    previous: int,
-    unit_bytes: int = 8,
-) -> tuple[int, list[int], int]:
-    if len(samples) != 8:
-        raise ValueError("SP5 predictive window encoding requires exactly 8 samples")
-    if unit_bytes not in (4, 8):
-        raise NotImplementedError("SP5 predictive encoder supports unit_bytes=4 or 8 only")
-    if family not in _PREDICTIVE_WIDTHS or family == "G":
-        raise NotImplementedError(f"SP5 family-{family} predictive encoder is not ported")
-
-    target = [_clip_i16(sample) for sample in samples]
-    previous = _clip_i16(previous)
-    bases = [0] * 8
-    decoded = [0] * 8
-
-    bases[7] = _sp5_direct_quantized_sample(target[7], exponent, unit_bytes)
-    decoded[7] = _s16(bases[7])
-
-    if family in ("B", "C") or (family == "D" and exponent == 10):
-        bases[3] = _sp5_direct_quantized_sample(target[3], exponent, unit_bytes)
-        decoded[3] = _s16(bases[3])
-    else:
-        bases[3] = _sp5_quantize_residual(
-            target[3],
-            previous,
-            decoded[7],
-            _SP5_Q6_WIDTH_PARAMETER[family],
-            exponent,
-            unit_bytes,
-        )
-        decoded[3] = _s16(bases[3] + _sp5_predictive_average(family, previous, decoded[7]))
-
-    if family == "B":
-        bases[1] = _sp5_direct_quantized_sample(target[1], exponent, unit_bytes)
-        decoded[1] = _s16(bases[1])
-        bases[5] = _sp5_direct_quantized_sample(target[5], exponent, unit_bytes)
-        decoded[5] = _s16(bases[5])
-    else:
-        width_parameter = _SP5_MID_WIDTH_PARAMETER[family]
-        bases[1] = _sp5_quantize_residual(
-            target[1],
-            previous,
-            decoded[3],
-            width_parameter,
-            exponent,
-            unit_bytes,
-        )
-        decoded[1] = _s16(bases[1] + _sp5_predictive_average(family, previous, decoded[3]))
-
-        bases[5] = _sp5_quantize_residual(
-            target[5],
-            decoded[3],
-            decoded[7],
-            width_parameter,
-            exponent,
-            unit_bytes,
-        )
-        decoded[5] = _s16(bases[5] + _sp5_predictive_average(family, decoded[3], decoded[7]))
-
-    even_width_parameter = _SP5_EVEN_WIDTH_PARAMETER[family]
-    for index, left_index, right_index in (
-        (0, -1, 1),
-        (2, 1, 3),
-        (4, 3, 5),
-        (6, 5, 7),
-    ):
-        left = previous if left_index < 0 else decoded[left_index]
-        right = decoded[right_index]
-        bases[index] = _sp5_quantize_residual(
-            target[index],
-            left,
-            right,
-            even_width_parameter,
-            exponent,
-            unit_bytes,
-        )
-        decoded[index] = _sp5_predictive_add(
-            family,
-            bases[index],
-            _sp5_predictive_average(family, left, right),
-            index,
-        )
-
-    widths = _predictive_widths_for_unit(unit_bytes)[family]
-    codes = [
-        _sp5_code_from_quantized(base, width, exponent, unit_bytes)
-        for base, width in zip(bases, widths, strict=True)
-    ]
-    packed = _pack_predictive_codes(codes, widths)
-    control_shift = 60 if unit_bytes == 8 else 28
-    packed |= _sp5_q14_control_bits(family, bases[7], exponent, unit_bytes) << control_shift
-    return packed, decoded, decoded[7]
-
-
-def _sp5_control_or_bytes(family: str, exponent: int, unit_bytes: int = 8) -> tuple[int, int]:
-    if unit_bytes == 4:
-        return _sp5_control_or_bytes_unit4(family, exponent)
-    if unit_bytes != 8:
-        raise NotImplementedError("SP5 control byte synthesis currently supports unit_bytes=4 or 8 only")
-
-    if family == "A":
-        value = 0xEC
-        return value & 0xF0, (value << 4) & 0xF0
-    if family == "B":
-        value = exponent + 0xE2
-        return value & 0xF0, (value << 4) & 0xF0
     if family == "C":
-        value = exponent
-        return ((value & 0xFC) << 4) & 0xF0, (value << 6) & 0xF0
+        return 2
     if family == "D":
-        if exponent == 10:
-            value = exponent + 0xF0
-            return value & 0xF0, (value << 4) & 0xF0
-        value = exponent + 0x33
-        return ((value & 0xF8) << 2) & 0xF0, (value << 5) & 0xF0
+        return 0 if exponent == 10 else 1
     if family == "E":
-        if exponent == 8:
-            value = exponent + 0x2E
-            return ((value & 0xF8) << 2) & 0xF0, (value << 5) & 0xF0
-        value = exponent - 2
-        return ((value & 0xFC) << 4) & 0xF0, (value << 6) & 0xF0
+        return 1 if exponent == 8 else 2
     if family == "F":
-        value = exponent + 0x2F
-        return ((value & 0xF8) << 2) & 0xF0, (value << 5) & 0xF0
-    raise NotImplementedError(f"SP5 family-{family} control byte synthesis is not ported")
-
-
-def _sp5_control_or_bytes_unit4(family: str, exponent: int) -> tuple[int, int]:
-    """Unit-4 control nibble synthesis, the inverse of `parse_control`'s
-    unit_bytes=4 family regions. Family boundaries differ from unit-8: B only
-    exists at exponent 12 (the unit-4 saturating family, control 0xFF), D uses
-    a +0x34 selector base and 0xFE for exponent 10, E's exponent-8 region is
-    0xCE-based, and F's selector base is +0x30 with no exponent offset."""
-
-    if family == "B":
-        if exponent != 12:
-            raise ValueError("unit-4 family-B encoding requires exponent 12")
-        return 0xF0, 0xF0
-    if family == "C":
-        value = exponent
-        return ((value & 0xFC) << 4) & 0xF0, (value << 6) & 0xF0
-    if family == "D":
-        if exponent == 10:
-            return 0xF0, 0xE0
-        value = exponent + 0x34
-        return ((value & 0xF8) << 2) & 0xF0, (value << 5) & 0xF0
-    if family == "E":
-        if exponent == 8:
-            return 0xC0, 0xE0
-        value = exponent - 2
-        return ((value & 0xFC) << 4) & 0xF0, (value << 6) & 0xF0
-    if family == "F":
-        value = exponent + 0x30
-        return ((value & 0xF8) << 2) & 0xF0, (value << 5) & 0xF0
-    raise NotImplementedError(f"SP5 unit-4 family-{family} control byte synthesis is not ported")
-
-
-def _sp5_block_from_predictive_windows(first: int, second: int, family: str, exponent: int) -> bytes:
-    first_window = _predictive_window_from_packed(first)
-    second_window = _predictive_window_from_packed(second)
-    block = bytearray(16)
-    for position in (0, 1, 4, 5, 8, 9, 12, 13):
-        block[position] = first_window[position]
-        block[position + 2] = second_window[position]
-
-    byte0_or, byte2_or = _sp5_control_or_bytes(family, exponent, unit_bytes=8)
-    block[0] |= byte0_or
-    block[2] |= byte2_or
-    return bytes(block)
-
-
-def _sp5_block_from_predictive_windows_unit4(
-    first: int,
-    second: int,
-    family: str,
-    exponent: int,
-) -> bytes:
-    """Assemble one 8-byte unit-4 block.
-
-    Each window is one big-endian 32-bit word: 28 packed code bits plus the
-    window's control nibble at the top. The block-level staging swap in
-    `_prepare_control_bytes` maps window 1 to block bytes 0..3 and window 2 to
-    block bytes 4..7, with the control byte split across both top nibbles."""
-
-    block = bytearray(8)
-    block[0:4] = (first & 0xFFFFFFFF).to_bytes(4, "big")
-    block[4:8] = (second & 0xFFFFFFFF).to_bytes(4, "big")
-    byte0_or, byte2_or = _sp5_control_or_bytes(family, exponent, unit_bytes=4)
-    block[0] |= byte0_or
-    block[4] |= byte2_or
-    return bytes(block)
-
-
-def _sp5_encode_predictive_block(
-    family: str,
-    exponent: int,
-    samples: list[int],
-    previous: int,
-    unit_bytes: int = 8,
-) -> tuple[bytes, int]:
-    if len(samples) != 16:
-        raise ValueError("SP5 predictive block encoding requires exactly 16 samples")
-
-    first, _first_decoded, first_previous = _sp5_encode_predictive_window(
-        family,
-        exponent,
-        samples[:8],
-        previous,
-        unit_bytes=unit_bytes,
-    )
-    second, _second_decoded, second_previous = _sp5_encode_predictive_window(
-        family,
-        exponent,
-        samples[8:],
-        first_previous,
-        unit_bytes=unit_bytes,
-    )
-    if unit_bytes == 4:
-        block = _sp5_block_from_predictive_windows_unit4(first, second, family, exponent)
-    else:
-        block = _sp5_block_from_predictive_windows(first, second, family, exponent)
-    return block, second_previous
-
-
-def encode_standard_stream(samples: list[int]) -> bytes:
-    """Encode 44.1 kHz PCM samples as STANDARD unit-8 RDAC bytes.
-
-    The stream is padded to a 16-frame boundary, matching the observed SP-555
-    STANDARD sample-file shape where one encoded byte decodes to one frame.
-    """
-
-    padded = [_clip_i16(sample) for sample in samples]
-    remainder = len(padded) % 16
-    if remainder:
-        padded.extend([0] * (16 - remainder))
-
-    encoded = bytearray()
-    previous = 0
-    for offset in range(0, len(padded), 16):
-        target = padded[offset : offset + 16]
-        selection = _sp5_select_family(target, previous, unit_bytes=8)
-        if selection.family in ("B", "C", "D", "E", "F"):
-            block, previous = _sp5_encode_predictive_block(
-                selection.family,
-                selection.exponent,
-                target,
-                previous,
-            )
-        else:
-            block, _score, previous = _encode_family_a_block_scored(target)
-
-        encoded.extend(block)
-    return bytes(encoded)
-
-
-def encode_unit4_stream(samples: list[int]) -> bytes:
-    """Encode 44.1 kHz PCM samples as lo-fi unit-4 RDAC bytes.
-
-    The stream is padded to a 16-frame boundary; each block packs 16 frames
-    into 8 encoded bytes. The input is expected to be the full-rate stream the
-    decoder reproduces (hardware lo-fi captures are quarter-rate content
-    linearly interpolated back to 44.1 kHz before encoding)."""
-
-    padded = [_clip_i16(sample) for sample in samples]
-    remainder = len(padded) % 16
-    if remainder:
-        padded.extend([0] * (16 - remainder))
-
-    encoded = bytearray()
-    previous = 0
-    for offset in range(0, len(padded), 16):
-        target = padded[offset : offset + 16]
-        selection = _sp5_select_family(target, previous, unit_bytes=4)
-        family, exponent = selection.family, selection.exponent
-        if family == "A":
-            # Unit-4 streams have no family A; B/exp-12 is the saturating
-            # direct-coded family (control 0xFF).
-            family, exponent = "B", 12
-        block, previous = _sp5_encode_predictive_block(
-            family,
-            exponent,
-            target,
-            previous,
-            unit_bytes=4,
-        )
-        encoded.extend(block)
-    return bytes(encoded)
+        return 1
+    return 0

@@ -400,6 +400,28 @@ def open_sample_manager(host: SampleManagerHost, smpinfo_path: Optional[Path] = 
         pad = (slot % 8) + 1
         return f"{bank}{pad}"
 
+    def metadata_from_record(slot_record: SlotRecord) -> Dict[str, str]:
+        # LO-FI streams are raw 8-byte blocks; STANDARD/LONG are 12-byte blocks.
+        block_bytes = (
+            sp303_codec.LOFI_BLOCK_BYTES
+            if slot_record.sample_rate == sp303_codec.LOFI_SAMPLE_RATE
+            else sp303_codec.BLOCK_BYTES
+        )
+        frames = slot_record.sample_length_bytes // block_bytes * sp303_codec.SAMPLES_PER_BLOCK
+        seconds = frames / slot_record.sample_rate
+        duration_text = f"{seconds:.2f}s" if seconds >= 1.0 else f"{seconds * 1000.0:.1f}ms"
+        is_standard = slot_record.sample_rate == sp303_codec.STANDARD_SAMPLE_RATE
+        return {
+            "long_lofi": "-" if is_standard else slot_record.mode,
+            "stereo": "Stereo" if slot_record.is_stereo else "Mono",
+            "length": f"{slot_record.sample_length_bytes:,} B",
+            "duration": duration_text,
+            "level": str(slot_record.level),
+            "loop": "Loop" if slot_record.is_loop else "Off",
+            "reverse": "Reverse" if slot_record.is_reverse else "Off",
+            "gate": "Gate" if slot_record.is_gate else "Off",
+        }
+
     def current_assignment_snapshot() -> Dict[int, str]:
         snapshot: Dict[int, str] = {}
         for slot, source in enumerate(session.prep.sources):
@@ -560,6 +582,18 @@ def open_sample_manager(host: SampleManagerHost, smpinfo_path: Optional[Path] = 
                 stereo = False
 
             session.assign_archived_sp0(slot, selected_path, stereo)
+            # The previous card's record no longer describes this pad; rebuild
+            # it from the sniffed assignment so preview/convert use the right
+            # framing and length.
+            source = session.prep.sources[slot]
+            slot_records[slot] = SlotRecord(
+                slot_index=slot,
+                sample_length_bytes=source.sample_length,
+                loop_point_bytes=source.sample_length,
+                is_stereo=source.is_stereo,
+                sample_rate=source.sample_rate,
+            )
+            slot_metadata[slot] = metadata_from_record(slot_records[slot])
             refresh_tree()
             host.update_status(f"Assigned SP0 to {slot_to_label(slot)}")
         except Exception as exc:
@@ -591,30 +625,12 @@ def open_sample_manager(host: SampleManagerHost, smpinfo_path: Optional[Path] = 
                 if slot_record.is_empty:
                     continue
 
-                # LO-FI streams are raw 8-byte blocks; STANDARD/LONG are 12-byte blocks.
-                block_bytes = (
-                    sp303_codec.LOFI_BLOCK_BYTES
-                    if slot_record.sample_rate == sp303_codec.LOFI_SAMPLE_RATE
-                    else sp303_codec.BLOCK_BYTES
-                )
-                frames = slot_record.sample_length_bytes // block_bytes * sp303_codec.SAMPLES_PER_BLOCK
-                seconds = frames / slot_record.sample_rate
-                duration_text = f"{seconds:.2f}s" if seconds >= 1.0 else f"{seconds * 1000.0:.1f}ms"
                 level_state[slot] = slot_record.level
                 gate_state[slot] = slot_record.is_gate
                 loop_state[slot] = slot_record.is_loop
                 reverse_state[slot] = slot_record.is_reverse
                 slot_records[slot] = slot_record
-                slot_metadata[slot] = {
-                    "long_lofi": "-" if slot_record.mode == "STANDARD" else slot_record.mode,
-                    "stereo": "Stereo" if slot_record.is_stereo else "Mono",
-                    "length": f"{slot_record.sample_length_bytes:,} B",
-                    "duration": duration_text,
-                    "level": str(slot_record.level),
-                    "loop": "Loop" if slot_record.is_loop else "Off",
-                    "reverse": "Reverse" if slot_record.is_reverse else "Off",
-                    "gate": "Gate" if slot_record.is_gate else "Off",
-                }
+                slot_metadata[slot] = metadata_from_record(slot_record)
 
                 left_file = source_dir / f"SMP{slot:04X}L.SP0"
                 right_file = source_dir / f"SMP{slot:04X}R.SP0"
@@ -624,7 +640,13 @@ def open_sample_manager(host: SampleManagerHost, smpinfo_path: Optional[Path] = 
                 if slot_record.is_stereo and not right_file.exists():
                     missing_files.append(right_file.name)
                     continue
-                session.assign_archived_sp0(slot, left_file, slot_record.is_stereo)
+                session.assign_archived_sp0(
+                    slot,
+                    left_file,
+                    slot_record.is_stereo,
+                    sample_rate=slot_record.sample_rate,
+                    sample_length=slot_record.sample_length_bytes,
+                )
 
             baseline_assignments.clear()
             baseline_assignments.update(current_assignment_snapshot())
@@ -666,6 +688,12 @@ def open_sample_manager(host: SampleManagerHost, smpinfo_path: Optional[Path] = 
         if slot is None:
             return
         session.clear_slot(slot)
+        slot_records.pop(slot, None)
+        slot_metadata.pop(slot, None)
+        level_state.pop(slot, None)
+        gate_state.pop(slot, None)
+        loop_state.pop(slot, None)
+        reverse_state.pop(slot, None)
         refresh_tree()
         host.update_status(f"Cleared {slot_to_label(slot)}")
 
@@ -911,23 +939,52 @@ def open_sample_manager(host: SampleManagerHost, smpinfo_path: Optional[Path] = 
     def decode_sp0_channel(path: Path, record: Optional[SlotRecord]) -> tuple[List[int], int]:
         """Decode one SP0 audio file, returning (samples, sample_rate)."""
         if record is not None:
+            # Clamp to the file's actual audio bytes: a stereo R file can be
+            # shorter than the (L-derived) SMPINFO length, and cards written by
+            # older Dr. Sidekick versions stored trailer-inclusive lengths.
             lo_fi = record.sample_rate == sp303_codec.LOFI_SAMPLE_RATE
             samples = sp303_codec.decode_sp0_file(
-                path, encoded_length=record.sample_length_bytes, lo_fi=lo_fi
+                path,
+                encoded_length=record.sample_length_bytes,
+                lo_fi=lo_fi,
+                clamp_length=True,
             )
             return samples, record.sample_rate
         # No SMPINFO record (arbitrary file): STANDARD/LONG streams are
         # page-framed; LO-FI streams are raw blocks. LONG is byte-identical to
         # STANDARD, so without metadata we default to 44.1 kHz.
         raw = path.read_bytes()
-        if sp303_codec.looks_page_framed(raw):
-            samples = sp303_codec.decode_standard_stream(sp303_codec.strip_page_trailers(raw))
-            return samples, sp303_codec.STANDARD_SAMPLE_RATE
-        return sp303_codec.decode_lofi_stream(raw), sp303_codec.LOFI_SAMPLE_RATE
+        framed = sp303_codec.looks_page_framed(raw)
+        if not framed and len(raw) % sp303_codec.LOFI_BLOCK_BYTES:
+            messagebox.showwarning(
+                "Decode SP0",
+                f"{path.name} is neither cleanly page-framed (STANDARD/LONG) nor "
+                f"a multiple of the LO-FI block size; it may be truncated or "
+                f"trailer-stripped. Decoding as LO-FI may produce noise.",
+                parent=dialog,
+            )
+        samples = sp303_codec.decode_sp0_stream(raw, lo_fi=not framed, name=path.name)
+        rate = sp303_codec.STANDARD_SAMPLE_RATE if framed else sp303_codec.LOFI_SAMPLE_RATE
+        return samples, rate
+
+    # Preview-then-convert decodes the same bytes through the pure-Python
+    # decoder on the Tk thread; memoize the most recent results.
+    decode_cache: Dict[tuple, tuple] = {}
 
     def decode_sp0_to_pcm(left_path: Path, is_stereo: bool, slot: Optional[int] = None):
         record = slot_records.get(slot) if slot is not None else None
+        record_key = (
+            (record.sample_length_bytes, record.sample_rate) if record is not None else None
+        )
+        try:
+            stat = left_path.stat()
+            cache_key = (str(left_path), stat.st_mtime_ns, stat.st_size, is_stereo, record_key)
+        except OSError:
+            cache_key = None
+        if cache_key is not None and cache_key in decode_cache:
+            return decode_cache[cache_key]
         samples_l, sample_rate = decode_sp0_channel(left_path, record)
+        result = None
         if is_stereo:
             right_path = left_path.with_name(left_path.name[:-5] + "R.SP0")
             if right_path.exists():
@@ -936,8 +993,14 @@ def open_sample_manager(host: SampleManagerHost, smpinfo_path: Optional[Path] = 
                 samples_l += [0] * (count - len(samples_l))
                 samples_r += [0] * (count - len(samples_r))
                 pcm = [value for pair in zip(samples_l, samples_r) for value in pair]
-                return pcm, count, 2, sample_rate
-        return samples_l, len(samples_l), 1, sample_rate
+                result = (pcm, count, 2, sample_rate)
+        if result is None:
+            result = (samples_l, len(samples_l), 1, sample_rate)
+        if cache_key is not None:
+            if len(decode_cache) >= 8:
+                decode_cache.pop(next(iter(decode_cache)))
+            decode_cache[cache_key] = result
+        return result
 
     def preview_pad() -> None:
         slot = selected_slot()
@@ -1184,6 +1247,14 @@ def open_sample_manager(host: SampleManagerHost, smpinfo_path: Optional[Path] = 
             reverse_state[slot_a] = reverse_b
         if reverse_a:
             reverse_state[slot_b] = reverse_a
+        record_a = slot_records.pop(slot_a, None)
+        record_b = slot_records.pop(slot_b, None)
+        if record_b is not None:
+            record_b.slot_index = slot_a
+            slot_records[slot_a] = record_b
+        if record_a is not None:
+            record_a.slot_index = slot_b
+            slot_records[slot_b] = record_a
         refresh_tree()
         tree.selection_set(str(slot_b))
         tree.focus(str(slot_b))

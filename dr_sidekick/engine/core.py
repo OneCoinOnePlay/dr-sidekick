@@ -28,7 +28,15 @@ import urllib.error
 import urllib.request
 import wave
 
-from .sp303_codec import MODE_BY_RATE, sample_rate_from_field
+from .sp303_codec import (
+    LOFI_SAMPLE_RATE,
+    MODE_BY_RATE,
+    STANDARD_SAMPLE_RATE,
+    looks_page_framed,
+    page_framed_audio_bytes,
+    rate_field_from_sample_rate,
+    sample_rate_from_field,
+)
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 log = logging.getLogger("dr_sidekick")
@@ -1109,7 +1117,10 @@ def _compute_flags(sample_len: int, params_word: int) -> int:
     raw = sample_len * params_word / SP303_FLAGS_K
     if raw <= 0:
         return SP303_FLAGS_EMPTY
-    exp = round(math.log2(raw))
+    # Samples below the hardware's 110 ms minimum can round to a negative
+    # exponent; floor the category at 2^0 instead of crashing on a negative
+    # shift.
+    exp = max(0, round(math.log2(raw)))
     return 1 << exp
 
 # Pad mapping constants
@@ -1226,8 +1237,7 @@ class SlotRecord:
             record[28:32] = struct.pack('>HH', divider, divider)
         
         # Bytes 32-33: rate field (tens of Hz); byte 34: const 0x06; byte 35: level
-        rate_field = 1102 if self.sample_rate == 11025 else self.sample_rate // 10
-        record[32:34] = struct.pack('>H', rate_field)
+        record[32:34] = struct.pack('>H', rate_field_from_sample_rate(self.sample_rate))
         record[34] = 0x06
         record[35] = self.level & 0x7F
         
@@ -1377,18 +1387,20 @@ class SMPINFO:
     
     def set_slot(self, slot_index: int, sample_length: int, is_stereo: bool = False,
                  loop_point: Optional[int] = None, is_gate: bool = False, is_loop: bool = False,
-                 is_reverse: bool = False):
+                 is_reverse: bool = False, sample_rate: int = STANDARD_SAMPLE_RATE):
         """
         Set a slot's parameters
 
         Args:
             slot_index: Slot number (0-15)
-            sample_length: Length of sample data in bytes
+            sample_length: Length of sample data in audio bytes (trailer-free)
             is_stereo: True for stereo (L+R files), False for mono
             loop_point: Loop point in bytes, or None for no loop (one-shot)
             is_gate: True to enable gate playback mode
             is_loop: True to enable loop playback mode
             is_reverse: True to enable reverse playback mode
+            sample_rate: Playback rate selecting the sample mode
+                (44100 STANDARD / 22050 LONG / 11025 LO-FI)
         """
         if not 0 <= slot_index < SLOT_COUNT:
             raise ValueError(f"Slot index must be 0-15, got {slot_index}")
@@ -1401,6 +1413,7 @@ class SMPINFO:
             sample_length_bytes=sample_length,
             loop_point_bytes=loop_point,
             is_stereo=is_stereo,
+            sample_rate=sample_rate,
             is_gate=is_gate,
             is_loop=is_loop,
             is_reverse=is_reverse,
@@ -1554,8 +1567,9 @@ class SampleSource:
     slot_index: int  # 0-15 (0-7=Bank C, 8-15=Bank D)
     source_type: SourceType
     source_path: Optional[Path] = None  # Path to source file
-    sample_length: int = 0  # Length in bytes (for .SP0 files)
+    sample_length: int = 0  # Audio bytes, trailer-free (for .SP0 files)
     is_stereo: bool = False
+    sample_rate: int = STANDARD_SAMPLE_RATE  # 44100 STANDARD / 22050 LONG / 11025 LO-FI
     
     @property
     def bank(self) -> SampleBank:
@@ -1595,37 +1609,58 @@ class SP303CardPrep:
                 source_type=SourceType.EMPTY
             ))
     
-    def assign_archived_sp0(self, slot_index: int, sp0_file: Path, 
-                           is_stereo: bool = False):
+    def assign_archived_sp0(self, slot_index: int, sp0_file: Path,
+                           is_stereo: bool = False,
+                           sample_rate: Optional[int] = None,
+                           sample_length: Optional[int] = None):
         """
         Assign an archived .SP0 file to a slot
-        
+
         Args:
             slot_index: Target slot (0-15)
             sp0_file: Path to existing .SP0 file
             is_stereo: True if stereo (requires both L and R files)
+            sample_rate: Playback rate from the card's SMPINFO record; when
+                omitted, the mode is sniffed from the file framing (page-framed
+                → STANDARD, raw blocks → LO-FI)
+            sample_length: Audio-byte length from the card's SMPINFO record;
+                when omitted, it is derived from the file size (page trailers
+                excluded for STANDARD/LONG, raw size for LO-FI)
         """
         if not 0 <= slot_index < SLOT_COUNT:
             raise ValueError(f"Slot must be 0-15, got {slot_index}")
-        
+
         if not sp0_file.exists():
             raise FileNotFoundError(f"SP0 file not found: {sp0_file}")
-        
-        # Get file size
+
         file_size = sp0_file.stat().st_size
-        
+        if sample_rate is None:
+            sample_rate = (
+                STANDARD_SAMPLE_RATE
+                if looks_page_framed(sp0_file.read_bytes())
+                else LOFI_SAMPLE_RATE
+            )
+        if sample_length is None:
+            # SMPINFO lengths count audio bytes only: STANDARD/LONG files carry
+            # an 8-byte trailer per 512-byte page, LO-FI files are raw blocks.
+            if sample_rate == LOFI_SAMPLE_RATE:
+                sample_length = file_size
+            else:
+                sample_length = page_framed_audio_bytes(file_size)
+
         # For stereo, check if R file exists
         if is_stereo:
             r_file = sp0_file.parent / sp0_file.name.replace('L.SP0', 'R.SP0')
             if not r_file.exists():
                 raise FileNotFoundError(f"Stereo R file not found: {r_file}")
-        
+
         self.sources[slot_index] = SampleSource(
             slot_index=slot_index,
             source_type=SourceType.ARCHIVED_SP0,
             source_path=sp0_file,
-            sample_length=file_size,
-            is_stereo=is_stereo
+            sample_length=sample_length,
+            is_stereo=is_stereo,
+            sample_rate=sample_rate
         )
     
     def assign_wav_for_import(self, slot_index: int, wav_file: Path):
@@ -1764,7 +1799,12 @@ class SP303CardPrep:
                     archived_copy_ops.append((r_source, r_target, r_target.name))
                 
                 # Update SMPINFO
-                smpinfo.set_slot(source.slot_index, source.sample_length, source.is_stereo)
+                smpinfo.set_slot(
+                    source.slot_index,
+                    source.sample_length,
+                    source.is_stereo,
+                    sample_rate=source.sample_rate,
+                )
 
         if archived_copy_ops:
             import tempfile
@@ -1961,7 +2001,8 @@ class SP303CardPrep:
                     'type': source.source_type.value,
                     'path': str(source.source_path) if source.source_path else None,
                     'stereo': source.is_stereo,
-                    'length': source.sample_length
+                    'length': source.sample_length,
+                    'sample_rate': source.sample_rate
                 })
         
         with open(filepath, 'w') as f:
@@ -1981,7 +2022,10 @@ class SP303CardPrep:
             path = Path(source_data['path']) if source_data['path'] else None
             
             if source_type == SourceType.ARCHIVED_SP0:
-                prep.assign_archived_sp0(slot, path, source_data.get('stereo', False))
+                prep.assign_archived_sp0(
+                    slot, path, source_data.get('stereo', False),
+                    sample_rate=source_data.get('sample_rate'),
+                )
             elif source_type == SourceType.WAV_FILE:
                 prep.assign_wav_for_import(slot, path)
             elif source_type == SourceType.AIFF_FILE:
@@ -2185,8 +2229,13 @@ class AssignmentSession:
     def assign_wav(self, slot: int, wav_file: Path):
         self.prep.assign_wav_for_import(slot, wav_file)
 
-    def assign_archived_sp0(self, slot: int, sp0_file: Path, stereo: bool):
-        self.prep.assign_archived_sp0(slot, sp0_file, stereo)
+    def assign_archived_sp0(self, slot: int, sp0_file: Path, stereo: bool,
+                            sample_rate: Optional[int] = None,
+                            sample_length: Optional[int] = None):
+        self.prep.assign_archived_sp0(
+            slot, sp0_file, stereo,
+            sample_rate=sample_rate, sample_length=sample_length,
+        )
 
     def clear_slot(self, slot: int):
         self.prep.clear_slot(slot)

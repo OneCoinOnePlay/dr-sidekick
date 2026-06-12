@@ -23,6 +23,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from . import rdac
+from .rdac import _avg16, _s16, _s32
 
 
 BLOCK_BYTES = 12
@@ -59,36 +60,19 @@ def sample_rate_from_field(rate_field: int) -> int:
     return rate_field * 10
 
 
-def _s16(value: int) -> int:
-    value &= 0xFFFF
-    return value - 0x10000 if value & 0x8000 else value
+def rate_field_from_sample_rate(sample_rate: int) -> int:
+    """Inverse of `sample_rate_from_field`: published rate to SMPINFO field.
 
-
-def _s32(value: int) -> int:
-    value &= 0xFFFFFFFF
-    return value - 0x100000000 if value & 0x80000000 else value
-
-
-def _avg16(left: int, right: int) -> int:
-    return _s16((left + right) >> 1)
-
-
-def _add_words(left: int, right: int) -> int:
-    return _s16((left + right) & 0xFFFF)
-
-
-def _sat_upper_s16(value: int) -> int:
-    return min(value, 0x7FFF)
+    The hardware floors LO-FI's 1102.5 tens of Hz to 1102.
+    """
+    if sample_rate == LOFI_SAMPLE_RATE:
+        return 1102
+    return sample_rate // 10
 
 
 def _sign_extend(value: int, width: int) -> int:
     sign = 1 << (width - 1)
     return (value ^ sign) - sign
-
-
-def _bit_at_msb_index(block: bytes, bit_index: int) -> int:
-    byte_index, bit_in_byte = divmod(bit_index, 8)
-    return (block[byte_index] >> (7 - bit_in_byte)) & 1
 
 
 def _predictive_average(family: str, left: int, right: int) -> int:
@@ -98,45 +82,20 @@ def _predictive_average(family: str, left: int, right: int) -> int:
     return _avg16(left, right)
 
 
-def _predictive_add(family: str, base: int, average: int, index: int) -> int:
-    if family == "C":
-        return _add_words(base, average)
-    if family == "F":
-        if index in (0, 6):
-            return _add_words(base, average)
-        if index in (2, 4):
-            return _s16(_sat_upper_s16(base + average))
-        return _s16(base + average)
-    if family in ("D", "E") and index in (2, 4):
-        return _s16(_sat_upper_s16(base + average))
-    return _s16(base + average)
+_predictive_add = rdac.predictive_add
+_q14_extra_bit_count = rdac.q14_extra_bit_count
+
+# SP-303 STANDARD keeps the same family structure as SP-555 predictive blocks,
+# but with 6-bit-scale widths: unit-6 derives from the shared unit-8 base
+# table as `width - 2`, the same way rdac derives unit-4 as `width - 4`.
+_UNIT6_WIDTHS = {
+    family: tuple(width - 2 for width in widths)
+    for family, widths in rdac.PREDICTIVE_WIDTHS.items()
+}
 
 
 def _base_widths(family: str) -> tuple[int, ...]:
-    # SP-303 STANDARD keeps the same family structure as SP-555 predictive
-    # blocks, but with 6-bit-scale widths.
-    widths = {
-        "B": (5, 6, 5, 6, 5, 6, 5, 6),
-        "C": (5, 6, 5, 7, 5, 6, 5, 5),
-        "D": (4, 6, 4, 8, 4, 6, 4, 8),
-        "E": (4, 6, 4, 7, 4, 6, 4, 9),
-        "F": (4, 5, 4, 7, 4, 5, 4, 11),
-    }
-    return widths[family]
-
-
-def _q14_extra_bit_count(family: str, exponent: int) -> int:
-    if family == "B":
-        return 0
-    if family == "C":
-        return 2
-    if family == "D":
-        return 0 if exponent == 10 else 1
-    if family == "E":
-        return 1 if exponent == 8 else 2
-    if family == "F":
-        return 1
-    return 0
+    return _UNIT6_WIDTHS[family]
 
 
 def _dequant(code: int, width: int, exponent: int, unit_bytes: int) -> int:
@@ -279,12 +238,13 @@ def decode_family_a(block: bytes, previous: int) -> tuple[list[int], int]:
     predictive block keeps a valid seed.
     """
     del previous
+    bits = int.from_bytes(block[:BLOCK_BYTES], "big")
     decoded: list[int] = []
     for positions in FAMILY_A_BIT_LAYOUT:
         width = len(positions)
         code = 0
         for bit_index in positions:
-            code = (code << 1) | _bit_at_msb_index(block, bit_index)
+            code = (code << 1) | ((bits >> (95 - bit_index)) & 1)
         signed = _sign_extend(code, width)
         shift = 16 - width
         decoded.append(_s16((signed << shift) + (1 << (shift - 1))))
@@ -356,8 +316,16 @@ def decode_unit4_block(block: bytes, previous: int) -> tuple[list[int], int, rda
     if control.family == "A":
         decoded, next_previous = decode_unit4_family_a(block, previous)
         return decoded, next_previous, control
-    decoded, next_previous, _ = rdac.decode_rdac_block(block, previous, unit_bytes=4)
+    decoded, next_previous, _ = rdac.decode_rdac_block(
+        block, previous, unit_bytes=4, control=control
+    )
     return decoded, next_previous, control
+
+
+def page_framed_audio_bytes(file_size: int) -> int:
+    """Audio bytes in a page-framed STANDARD/LONG file of `file_size` bytes."""
+    full_pages, remainder = divmod(file_size, PAGE_BYTES)
+    return full_pages * PAGE_AUDIO_BYTES + min(remainder, PAGE_AUDIO_BYTES)
 
 
 def strip_page_trailers(data: bytes) -> bytes:
@@ -407,25 +375,47 @@ def looks_page_framed(data: bytes) -> bool:
     )
 
 
-def decode_sp0_file(
-    path: Path | str,
+def decode_sp0_stream(
+    raw: bytes,
     encoded_length: int | None = None,
     lo_fi: bool = False,
+    clamp_length: bool = False,
+    name: str = "SP0 stream",
 ) -> list[int]:
-    """Decode one `SMPxxxx[LR].SP0` audio file to a flat list of PCM samples.
+    """Decode a raw SP0 audio stream to a flat list of PCM samples.
 
     `encoded_length` is the SMPINFO length field (audio bytes, trailer-free);
     without it the whole stream is decoded, which may include padding noise at
-    the tail of the final page.
+    the tail of the final page. When the metadata length exceeds the stream
+    (truncated file, or a legacy trailer-inclusive length), `clamp_length`
+    decodes the available audio instead of raising.
     """
-    raw = Path(path).read_bytes()
     audio = raw if lo_fi else strip_page_trailers(raw)
     if encoded_length is not None:
         if encoded_length > len(audio):
-            raise ValueError(
-                f"{Path(path).name} has {len(audio)} audio bytes, metadata expects {encoded_length}"
-            )
+            if not clamp_length:
+                raise ValueError(
+                    f"{name} has {len(audio)} audio bytes, metadata expects {encoded_length}"
+                )
+            encoded_length = len(audio)
         audio = audio[:encoded_length]
     if lo_fi:
         return decode_lofi_stream(audio)
     return decode_standard_stream(audio)
+
+
+def decode_sp0_file(
+    path: Path | str,
+    encoded_length: int | None = None,
+    lo_fi: bool = False,
+    clamp_length: bool = False,
+) -> list[int]:
+    """Decode one `SMPxxxx[LR].SP0` audio file to a flat list of PCM samples."""
+    path = Path(path)
+    return decode_sp0_stream(
+        path.read_bytes(),
+        encoded_length=encoded_length,
+        lo_fi=lo_fi,
+        clamp_length=clamp_length,
+        name=path.name,
+    )
